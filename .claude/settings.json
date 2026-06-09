@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -nE '#if.*XE_PLATFORM_\\(ANDROID|AX360E\\)|#elif.*XE_PLATFORM_\\(ANDROID|AX360E\\)|#else|#endif' __TRACKED_VAR__/base/memory_posix.cc)",
+      "Bash(grep -nE 'SetAndroidPreApi26Name|void.*Set.*Name|bool.*const|class PosixCondition' __TRACKED_VAR__/base/threading_posix.cc)",
+      "Bash(grep -nE 'android_pre_api_26_name_\\(\\\\[|_mutex_\\)?.*;|char android_pre|std::mutex android_pre|android_pthread_getname_np_' __TRACKED_VAR__/base/threading_posix.cc)",
+      "Bash(grep -nE 'JNI_OnLoad|android_main|ANativeActivity|int main|GetAndroidApiLevel|InitializeAndroid|^[a-z].*\\\\\\(' __TRACKED_VAR__/base/main_android.cc)",
+      "Bash(grep -nE 'vk_pipeline_cache_path_|vkGetPipelineCacheData|WriteFile|vk_pipeline_cache_|SavePipelineCache|StorePipelineCache' __TRACKED_VAR__/gpu/vulkan/vulkan_pipeline_cache.cc)",
+      "Bash(awk 'NR>=3400 && NR<=3460 && /^[A-Za-z].*::|^void |^bool |^[A-Za-z_]+ [A-Za-z_]+::/' __TRACKED_VAR__/gpu/vulkan/vulkan_pipeline_cache.cc)",
+      "Bash(git show *)",
+      "Bash(awk '/SerializeDevicePipelineCacheIfDue\\\\\\(\\\\\\) \\\\{/,/^\\\\}/')",
+      "Bash(grep -nE 'vkCreateGraphicsPipelines|vkCreateComputePipelines|vk_pipeline_cache_' __TRACKED_VAR__/gpu/vulkan/vulkan_pipeline_cache.cc)",
+      "Bash(grep -n VulkanPipelineCache::EndSubmission __TRACKED_VAR__/gpu/vulkan/vulkan_pipeline_cache.cc)",
+      "Bash(awk '/void VulkanPipelineCache::EndSubmission\\\\\\(\\\\\\)/{f=1} f{print NR\": \"$0} /^}/{if\\(f\\)exit}' __TRACKED_VAR__/gpu/vulkan/vulkan_pipeline_cache.cc)",
+      "Bash(grep -nE 'creation_threads_|CreationThread|creation_thread|pipeline_creation_threads|async.*pipeline|CreationThreadFunction|creation_completion' __TRACKED_VAR__/gpu/vulkan/vulkan_pipeline_cache.cc)",
+      "Bash(sed -n 198,220p __TRACKED_VAR__/gpu/vulkan/vulkan_pipeline_cache.cc)",
+      "Bash(grep -nE 'ConfigurePipeline|creation_completion|AwaitPipelineCompletion|pending|kCreating|is_creating|Wait.*pipeline|pipeline.*ready|deferred' __TRACKED_VAR__/gpu/vulkan/vulkan_pipeline_cache.cc)",
+      "Bash(awk '/RecordGuestPresent/{print NR\": \"$0; for\\(i=NR-6;i<NR;i++\\) ; }')",
+      "Bash(grep -nB8 'RecordGuestPresent')",
+      "Bash(grep -nE '#include \"xenia/base/' __TRACKED_VAR__/gpu/vulkan/vulkan_command_processor.cc)",
+      "Bash(git subtree *)",
+      "Bash(awk '$1==160000{c++} END{print \"submodule gitlinks in vendored third_party: \"c+0}')"
+    ]
+  }
+}
