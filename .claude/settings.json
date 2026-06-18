@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -nE '#if.*XE_PLATFORM_\\(ANDROID|AX360E\\)|#elif.*XE_PLATFORM_\\(ANDROID|AX360E\\)|#else|#endif' __TRACKED_VAR__/base/memory_posix.cc)",
+      "Bash(grep -nE '#if.*XE_PLATFORM_\\(ANDROID|xendroid\\)|#elif.*XE_PLATFORM_\\(ANDROID|xendroid\\)|#else|#endif' __TRACKED_VAR__/base/memory_posix.cc)",
       "Bash(grep -nE 'SetAndroidPreApi26Name|void.*Set.*Name|bool.*const|class PosixCondition' __TRACKED_VAR__/base/threading_posix.cc)",
       "Bash(grep -nE 'android_pre_api_26_name_\\(\\\\[|_mutex_\\)?.*;|char android_pre|std::mutex android_pre|android_pthread_getname_np_' __TRACKED_VAR__/base/threading_posix.cc)",
       "Bash(grep -nE 'JNI_OnLoad|android_main|ANativeActivity|int main|GetAndroidApiLevel|InitializeAndroid|^[a-z].*\\\\\\(' __TRACKED_VAR__/base/main_android.cc)",
