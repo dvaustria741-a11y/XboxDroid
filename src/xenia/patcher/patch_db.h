@@ -11,7 +11,6 @@
 #define XENIA_PATCH_DB_H_
 
 #include <cstring>
-#include <filesystem>
 #include <map>
 #include <optional>
 #include <regex>
@@ -74,7 +73,6 @@ struct PatchInfoEntry {
 struct PatchFileEntry {
   uint32_t title_id;
   std::string title_name;
-  std::string filename;
   std::vector<uint64_t> hashes;
   std::vector<PatchInfoEntry> patch_info;
 };
@@ -100,13 +98,12 @@ struct PatchData {
 
 class PatchDB {
  public:
-  explicit PatchDB(std::filesystem::path patches_dir);
+  PatchDB(const std::filesystem::path patches_root);
   ~PatchDB();
 
   void LoadPatches();
 
-  PatchFileEntry ReadPatchFromString(const std::string& filename,
-                                     std::string_view toml_content) const;
+  PatchFileEntry ReadPatchFile(const std::filesystem::path& file_path) const;
 
   std::vector<PatchFileEntry> GetTitlePatches(
       const uint32_t title_id, const std::optional<uint64_t> hash);
@@ -135,19 +132,9 @@ class PatchDB {
       {"be16", PatchData(sizeof(uint16_t), PatchDataType::kBE16)},
       {"be8", PatchData(sizeof(uint8_t), PatchDataType::kBE8)}};
 
-  std::filesystem::path patches_dir_;
   std::vector<PatchFileEntry> loaded_patches_;
+  std::filesystem::path patches_root_;
 };
-
-struct BundledPatchFile {
-  std::string filename;
-  std::string toml_content;
-  PatchFileEntry entry;
-};
-
-std::vector<BundledPatchFile> EnumerateBundledPatchesForTitle(
-    uint32_t title_id);
-
 }  // namespace patcher
 }  // namespace xe
 

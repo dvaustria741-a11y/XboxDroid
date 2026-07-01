@@ -12,7 +12,7 @@
 #define XE_RESOLVE_COPY_EDRAM_BYTE_BUFFER_ALIGNMENT 4
 #include "resolve.xesli"
 
-byte_buffer_align16_wo_declare_xe(xe_resolve_dest, 1, 0, u0, space0, 1)
+byte_buffer_align16_wo_declare_xe(xe_resolve_dest, set=1, binding=0, u0, space0)
 #define LOCAL_SIZE_X_XE 8
 #define LOCAL_SIZE_Y_XE 8
 #define LOCAL_SIZE_Z_XE 1
@@ -43,7 +43,8 @@ entry_inputs_end_code_begin_compute_xe
       pixel_0, pixel_1, pixel_2, pixel_3);
   uint4_xe packed_01, packed_23;
   XePack64bpp4Pixels(pixel_0, pixel_1, pixel_2, pixel_3,
-                     resolve_info.dest_format, packed_01, packed_23);
+                     resolve_info.dest_format,
+                     resolve_info.dest_num_format, packed_01, packed_23);
   dont_flatten_xe
   if (pixel_index.x == 0u &&
       resolve_info.half_pixel_offset_fill_source.x != 0u) {

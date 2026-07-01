@@ -14,6 +14,15 @@
 #include "xenia/ui/imgui_guest_notification.h"
 #include "xenia/ui/imgui_notification.h"
 
+#if XE_PLATFORM_WIN32
+#include <playsoundapi.h>
+#endif
+
+DEFINE_string(notification_sound_path, "",
+              "Path (including filename) to selected notification sound. Sound "
+              "MUST be in wav format!",
+              "General");
+
 namespace xe {
 namespace ui {
 
@@ -37,6 +46,19 @@ void ImGuiGuestNotification::UpdateNotificationState() {
       // TODO(Gliniak): Implement delayed notifications.
       current_stage_ = NotificationStage::FazeIn;
       notification_draw_progress_ = 0.2f;
+#if XE_PLATFORM_WIN32
+      if (!cvars::notification_sound_path.empty()) {
+        auto notification_sound_path = cvars::notification_sound_path;
+        if (std::filesystem::exists(notification_sound_path)) {
+          PlaySound(std::wstring(notification_sound_path.begin(),
+                                 notification_sound_path.end())
+                        .c_str(),
+                    NULL,
+                    SND_FILENAME | SND_NODEFAULT | SND_NOSTOP | SND_ASYNC);
+        }
+      }
+#endif
+
       break;
     case NotificationStage::FazeIn: {
       SetCreationTime(Clock::QueryHostUptimeMillis());
@@ -91,22 +113,18 @@ void AchievementNotificationWindow::OnDraw(ImGuiIO& io) {
     return;
   }
 
-  const std::string longest_notification_text_line{
+  const std::string_view longest_notification_text_line =
       GetTitle().size() > GetDescription().size() ? GetTitle()
-                                                  : GetDescription()};
+                                                  : GetDescription();
 
   const ImVec2 screen_size = io.DisplaySize;
   const float window_scale =
       std::fminf(screen_size.x / default_drawing_resolution.x,
                  screen_size.y / default_drawing_resolution.y);
-  // Calculate effective font size accounting for global scale (resolution +
-  // font_size cvar) and notification's own text scale multiplier
-  const float effective_font_size = io.Fonts->Fonts[0]->FontSize *
-                                    io.FontGlobalScale *
-                                    default_notification_text_scale;
-  const ImVec2 text_size =
-      io.Fonts->Fonts[0]->CalcTextSizeA(effective_font_size, FLT_MAX, -1.0f,
-                                        longest_notification_text_line.c_str());
+  const float font_scale = default_font_size / io.Fonts->Fonts[0]->FontSize;
+  const ImVec2 text_size = io.Fonts->Fonts[0]->CalcTextSizeA(
+      default_font_size * default_notification_text_scale * window_scale,
+      FLT_MAX, -1.0f, longest_notification_text_line.data());
 
   const ImVec2 final_notification_size =
       CalculateNotificationSize(text_size, window_scale);
@@ -138,9 +156,8 @@ void AchievementNotificationWindow::OnDraw(ImGuiIO& io) {
 
   ImGui::Begin("Notification Window", NULL, NOTIFY_TOAST_FLAGS);
   {
-    // Only apply notification's own text scale - global scale already handles
-    // resolution and font_size cvar scaling
-    ImGui::SetWindowFontScale(default_notification_text_scale);
+    ImGui::SetWindowFontScale(default_notification_text_scale * font_scale *
+                              window_scale);
     // Set offset to image to prevent it from being right on border.
     ImGui::SetCursorPos(ImVec2(final_notification_size.x * 0.005f,
                                final_notification_size.y * 0.05f));
@@ -152,9 +169,7 @@ void AchievementNotificationWindow::OnDraw(ImGuiIO& io) {
 
     ImGui::SameLine();
     if (notification_draw_progress_ > 0.5f) {
-      const auto text = GetNotificationText();
-      ImGui::TextColored(white_color, "%.*s", static_cast<int>(text.size()),
-                         text.data());
+      ImGui::TextColored(white_color, "%s", GetNotificationText().data());
     }
   }
   // Restore previous style
@@ -172,22 +187,18 @@ void XNotifyWindow::OnDraw(ImGuiIO& io) {
     return;
   }
 
-  const std::string longest_notification_text_line{
+  const std::string_view longest_notification_text_line =
       GetTitle().size() > GetDescription().size() ? GetTitle()
-                                                  : GetDescription()};
+                                                  : GetDescription();
 
   const ImVec2 screen_size = io.DisplaySize;
   const float window_scale =
       std::fminf(screen_size.x / default_drawing_resolution.x,
                  screen_size.y / default_drawing_resolution.y);
-  // Calculate effective font size accounting for global scale (resolution +
-  // font_size cvar) and notification's own text scale multiplier
-  const float effective_font_size = io.Fonts->Fonts[0]->FontSize *
-                                    io.FontGlobalScale *
-                                    default_notification_text_scale;
-  const ImVec2 text_size =
-      io.Fonts->Fonts[0]->CalcTextSizeA(effective_font_size, FLT_MAX, -1.0f,
-                                        longest_notification_text_line.c_str());
+  const float font_scale = default_font_size / io.Fonts->Fonts[0]->FontSize;
+  const ImVec2 text_size = io.Fonts->Fonts[0]->CalcTextSizeA(
+      default_font_size * default_notification_text_scale * window_scale,
+      FLT_MAX, -1.0f, longest_notification_text_line.data());
 
   const ImVec2 final_notification_size =
       CalculateNotificationSize(text_size, window_scale);
@@ -219,9 +230,8 @@ void XNotifyWindow::OnDraw(ImGuiIO& io) {
 
   ImGui::Begin("Notification Window", NULL, NOTIFY_TOAST_FLAGS);
   {
-    // Only apply notification's own text scale - global scale already handles
-    // resolution and font_size cvar scaling
-    ImGui::SetWindowFontScale(default_notification_text_scale);
+    ImGui::SetWindowFontScale(default_notification_text_scale * font_scale *
+                              window_scale);
     // Set offset to image to prevent it from being right on border.
     ImGui::SetCursorPos(ImVec2(final_notification_size.x * 0.005f,
                                final_notification_size.y * 0.05f));
@@ -231,12 +241,13 @@ void XNotifyWindow::OnDraw(ImGuiIO& io) {
                  ImVec2(default_notification_icon_size.x * window_scale,
                         default_notification_icon_size.y * window_scale));
 
+    // Set offset to image to prevent it from being right on border.
+    // ImGui::SetCursorPos(ImVec2(final_notification_size.x * 0.1f,
+    //                           final_notification_size.y * 0.2f));
+
     ImGui::SameLine();
     if (notification_draw_progress_ > 0.5f) {
-      const auto description = GetDescription();
-      ImGui::TextColored(white_color, "%.*s",
-                         static_cast<int>(description.size()),
-                         description.data());
+      ImGui::TextColored(white_color, "%s", GetDescription().data());
     }
   }
   // Restore previous style

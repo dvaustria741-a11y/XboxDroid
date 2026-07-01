@@ -80,16 +80,9 @@ class FilePicker {
     selected_files_ = std::move(selected_files);
   }
 
-  const std::filesystem::path& initial_directory() const {
-    return initial_directory_;
-  }
-  void set_initial_directory(std::filesystem::path initial_directory) {
-    initial_directory_ = std::move(initial_directory);
-  }
-
   virtual bool Show(Window* parent_window = nullptr) = 0;
 
- protected:
+ private:
   Mode mode_;
   Type type_;
   std::string title_;
@@ -97,7 +90,6 @@ class FilePicker {
   std::string file_name_;
   std::vector<std::pair<std::string, std::string>> extensions_;
   bool multi_selection_;
-  std::filesystem::path initial_directory_;
 
   std::vector<std::filesystem::path> selected_files_;
 };

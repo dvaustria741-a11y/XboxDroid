@@ -1,5 +1,6 @@
-# Suppress warnings for all third-party code — we can't clean them up and
-# don't want them contributing to -Werror noise on our own targets.
+# third_party/CMakeLists.txt - All third-party library targets.
+
+# Suppress warnings for all third-party code.
 if(MSVC)
   add_compile_options(/W0)
 else()
@@ -34,19 +35,6 @@ add_library(aes_128 STATIC
   aes_128/unroll/aes.c
 )
 target_include_directories(aes_128 PUBLIC aes_128)
-
-# ==============================================================================
-# asio (header-only)
-# ==============================================================================
-add_library(asio INTERFACE)
-target_include_directories(asio INTERFACE asio/include)
-target_compile_definitions(asio INTERFACE
-  ASIO_STANDALONE
-  ASIO_NO_DEPRECATED
-)
-if(WIN32)
-  target_compile_definitions(asio INTERFACE _WIN32_WINNT=0x0A00)
-endif()
 
 # ==============================================================================
 # capstone
@@ -89,15 +77,6 @@ target_include_directories(capstone PUBLIC capstone/include PRIVATE capstone)
 # Force all capstone sources to compile as C
 file(GLOB_RECURSE _capstone_all_c "capstone/*.c")
 set_source_files_properties(${_capstone_all_c} PROPERTIES LANGUAGE C)
-
-# ==============================================================================
-# boost_context (fcontext_t fiber context switching)
-#
-# In its own subdirectory because it builds assembly: the project's global
-# C/C++ compile options (/Zc:*, /arch:AVX, ...) are not valid for ml64 and
-# silently break the MASM build, so that subdir clears inherited COMPILE_OPTIONS.
-# ==============================================================================
-add_subdirectory(boost_context)
 
 # ==============================================================================
 # cxxopts (header-only)
@@ -165,294 +144,20 @@ add_library(fmt STATIC
 target_include_directories(fmt PUBLIC fmt/include)
 
 # ==============================================================================
-# glslang-spirv (runtime: SPIR-V emission primitives for Xenia's own
-# SpirvShaderTranslator; used by the Vulkan backend and by the Metal backend's
-# SPIRV-Cross path)
+# glslang-spirv (not needed on macOS — no Vulkan/SPIR-V backend)
 # ==============================================================================
-file(GLOB _glslang_spirv_cpp "glslang/SPIRV/*.cpp")
-file(GLOB _glslang_spirv_h "glslang/SPIRV/*.h")
-file(GLOB _glslang_spirv_hpp "glslang/SPIRV/*.hpp11")
-# Excluding GlslangToSpv keeps MachineIndependent out of the runtime link.
-list(FILTER _glslang_spirv_cpp EXCLUDE REGEX "GlslangToSpv\\.cpp$")
-add_library(glslang-spirv STATIC
-  ${_glslang_spirv_cpp}
-  ${_glslang_spirv_h}
-  ${_glslang_spirv_hpp}
-  glslang/glslang/Include/visibility.h
-)
-target_include_directories(glslang-spirv PUBLIC glslang)
-
-# Cross-compiling x64-host → ARM64-target on Windows: the cross
-# toolchain produces an ARM64 PE for xenia-shader-cc that won't run on
-# the x64 host, so reuse the binary from a previous native build instead
-# (Windows-on-ARM runs x64 fine via Prism, and macOS handles its own
-# x86_64↔arm64 via Rosetta — both directions are unaffected).
-set(_xe_use_host_shader_cc FALSE)
-if(WIN32 AND CMAKE_CROSSCOMPILING AND XE_TARGET_AARCH64
-    AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
-  set(_xe_use_host_shader_cc TRUE)
-endif()
-
-if(NOT _xe_use_host_shader_cc)
-
-# ==============================================================================
-# SPIRV-Headers + SPIRV-Tools (host: SPIR-V optimization + disassembly
-# support for glslang's ENABLE_OPT path; used by the xenia-shader-cc tool)
-# ==============================================================================
-# Point SPIRV-Tools at our in-tree SPIRV-Headers checkout instead of the
-# external/spirv-headers path it expects by default.
-set(SPIRV-Headers_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Headers"
-    CACHE INTERNAL "")
-set(SPIRV_SKIP_TESTS ON CACHE INTERNAL "")
-set(SPIRV_SKIP_EXECUTABLES ON CACHE INTERNAL "")
-set(SKIP_SPIRV_TOOLS_INSTALL ON CACHE INTERNAL "")
-set(SPIRV_WERROR OFF CACHE INTERNAL "")
-set(SPIRV_BUILD_FUZZER OFF CACHE INTERNAL "")
-add_subdirectory(SPIRV-Tools EXCLUDE_FROM_ALL)
-
-# SPIRV-Tools unconditionally forces /W2 /WX on MSVC via its own
-# target_compile_options, which conflicts with the directory-level /W0 and
-# produces D9025 "overriding /W0 with /W2" for every translation unit. Strip
-# the /W* and /WX flags it added so only the directory-level /W0 survives.
-if(MSVC)
-  foreach(_spvt_target
-      SPIRV-Tools-static SPIRV-Tools-shared SPIRV-Tools-opt
-      SPIRV-Tools-link SPIRV-Tools-reduce SPIRV-Tools-diff)
-    if(TARGET ${_spvt_target})
-      get_target_property(_opts ${_spvt_target} COMPILE_OPTIONS)
-      if(_opts)
-        list(FILTER _opts EXCLUDE REGEX "^/[Ww]([0-9]|all|X)$")
-        set_target_properties(${_spvt_target} PROPERTIES COMPILE_OPTIONS "${_opts}")
-      endif()
-    endif()
-  endforeach()
-endif()
-
-# ==============================================================================
-# glslang (host: full frontend + SPIR-V emission for the xenia-shader-cc
-# build-time tool; all platforms, including macOS)
-# ==============================================================================
-# Read glslang's own version file to generate build_info.h in sync with the
-# pinned submodule, matching what glslang's own CMakeLists does.
-include(${CMAKE_CURRENT_SOURCE_DIR}/glslang/parse_version.cmake)
-parse_version(${CMAKE_CURRENT_SOURCE_DIR}/glslang/CHANGES.md GLSLANG)
-set(major ${GLSLANG_VERSION_MAJOR})
-set(minor ${GLSLANG_VERSION_MINOR})
-set(patch ${GLSLANG_VERSION_PATCH})
-set(flavor ${GLSLANG_VERSION_FLAVOR})
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/glslang/build_info.h.tmpl
-  ${CMAKE_CURRENT_BINARY_DIR}/glslang-build-info/glslang/build_info.h
-  @ONLY)
-
-file(GLOB _glslang_mi
-  "glslang/glslang/MachineIndependent/*.cpp"
-  "glslang/glslang/MachineIndependent/preprocessor/*.cpp"
-  "glslang/glslang/GenericCodeGen/*.cpp")
-file(GLOB _glslang_spirv_all "glslang/SPIRV/*.cpp")
-add_library(glslang STATIC
-  ${_glslang_mi}
-  ${_glslang_spirv_all}
-  glslang/glslang/ResourceLimits/ResourceLimits.cpp
-)
-if(WIN32)
-  target_sources(glslang PRIVATE glslang/glslang/OSDependent/Windows/ossource.cpp)
-else()
-  target_sources(glslang PRIVATE glslang/glslang/OSDependent/Unix/ossource.cpp)
-endif()
-target_include_directories(glslang PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/glslang
-  ${CMAKE_CURRENT_BINARY_DIR}/glslang-build-info)
-target_compile_features(glslang PUBLIC cxx_std_17)
-# Enable glslang's SpvTools.cpp optimizer/disassembler bridge to SPIRV-Tools.
-target_compile_definitions(glslang PRIVATE ENABLE_OPT=1)
-target_link_libraries(glslang PUBLIC SPIRV-Tools-opt SPIRV-Tools-static)
-# glslang relies on exceptions internally.
-if(MSVC)
-  target_compile_options(glslang PRIVATE /EHsc)
-endif()
-if(NOT WIN32)
-  find_package(Threads)
-  if(Threads_FOUND)
-    target_link_libraries(glslang PUBLIC Threads::Threads)
-  endif()
-endif()
-
-endif()  # NOT _xe_use_host_shader_cc (SPIRV-Tools + glslang block)
-
-# ==============================================================================
-# SPIRV-Cross (Apple only — used at runtime by xenia-gpu-metal for SPIR-V → MSL
-# via MslShader, and by MoltenVKShaderConverter below)
-# ==============================================================================
-if(APPLE)
-  add_library(spirv-cross STATIC
-    SPIRV-Cross/spirv_cross.cpp
-    SPIRV-Cross/spirv_cross_parsed_ir.cpp
-    SPIRV-Cross/spirv_parser.cpp
-    SPIRV-Cross/spirv_cfg.cpp
-    SPIRV-Cross/spirv_cross_util.cpp
-    SPIRV-Cross/spirv_glsl.cpp
-    SPIRV-Cross/spirv_msl.cpp
-    SPIRV-Cross/spirv_reflect.cpp
+if(NOT APPLE)
+  file(GLOB _glslang_spirv_cpp "glslang/SPIRV/*.cpp")
+  file(GLOB _glslang_spirv_h "glslang/SPIRV/*.h")
+  file(GLOB _glslang_spirv_hpp "glslang/SPIRV/*.hpp11")
+  list(FILTER _glslang_spirv_cpp EXCLUDE REGEX "GlslangToSpv\\.cpp$")
+  add_library(glslang-spirv STATIC
+    ${_glslang_spirv_cpp}
+    ${_glslang_spirv_h}
+    ${_glslang_spirv_hpp}
+    glslang/glslang/Include/visibility.h
   )
-  target_include_directories(spirv-cross PUBLIC SPIRV-Cross)
-  target_compile_features(spirv-cross PUBLIC cxx_std_17)
-  if(MSVC)
-    target_compile_options(spirv-cross PRIVATE /EHsc)
-  endif()
-endif()
-
-# ==============================================================================
-# MoltenVK (Apple only — Vulkan-on-Metal driver, statically linked into
-# xenia-ui-vulkan so the macOS build needs no MoltenVK install at runtime)
-# ==============================================================================
-# Mirrors the layout of MoltenVK's own CMakeLists.txt (Common +
-# MoltenVKShaderConverter + MoltenVK) but builds against our in-tree
-# Vulkan-Headers / SPIRV-Cross / SPIRV-Tools / cereal instead of fetching its
-# own copies via CPM.cmake. The SPIRV-Cross and cereal submodules are pinned to
-# the revisions MoltenVK expects (see MoltenVK/ExternalRevisions/*) so the
-# spirv_msl ABI and pipeline-cache serialization format match.
-if(APPLE)
-  # Record the MoltenVK submodule revision for MVKDevice's identification
-  # string (MoltenVK's own CMake runs `git rev-parse` here; we just shell
-  # out once at configure time and bake the string into a generated header).
-  execute_process(
-    COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK rev-parse --short HEAD
-    OUTPUT_VARIABLE MVK_GIT_REV
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-  if(NOT MVK_GIT_REV)
-    set(MVK_GIT_REV "00000000")
-  endif()
-  configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/Templates/cmake/mvkGitRevDerived.h.in
-    ${CMAKE_CURRENT_BINARY_DIR}/MoltenVK-gen/mvkGitRevDerived.h
-    @ONLY)
-
-  # MoltenVK::Common — OS/Foundation/Metal helpers shared by core + converter.
-  file(GLOB _mvk_common_src
-    "MoltenVK/Common/*.c"
-    "MoltenVK/Common/*.cpp"
-    "MoltenVK/Common/*.m"
-    "MoltenVK/Common/*.mm")
-  add_library(MoltenVK_Common STATIC ${_mvk_common_src})
-  add_library(MoltenVK::Common ALIAS MoltenVK_Common)
-  target_include_directories(MoltenVK_Common PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/Common
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/Vulkan-Headers/include)
-  target_compile_features(MoltenVK_Common PUBLIC cxx_std_17)
-  target_compile_options(MoltenVK_Common PUBLIC
-    -Wno-deprecated-declarations
-    -Wno-vla-cxx-extension)
-  target_compile_definitions(MoltenVK_Common PUBLIC
-    MVK_CONFIG_LOG_LEVEL=1          # error-only at runtime
-    MVK_USE_METAL_PRIVATE_API=1)    # primitive-restart disable + legacy SPI
-
-  # MoltenVK::ShaderConverter — wraps SPIRV-Cross + SPIRV-Tools to produce MSL.
-  file(GLOB _mvk_sc_src
-    "MoltenVK/MoltenVKShaderConverter/MoltenVKShaderConverter/*.c"
-    "MoltenVK/MoltenVKShaderConverter/MoltenVKShaderConverter/*.cpp"
-    "MoltenVK/MoltenVKShaderConverter/MoltenVKShaderConverter/*.m"
-    "MoltenVK/MoltenVKShaderConverter/MoltenVKShaderConverter/*.mm")
-  add_library(MoltenVK_ShaderConverter STATIC ${_mvk_sc_src})
-  add_library(MoltenVK::ShaderConverter ALIAS MoltenVK_ShaderConverter)
-  target_include_directories(MoltenVK_ShaderConverter PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVKShaderConverter
-    ${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Headers/include)
-  target_link_libraries(MoltenVK_ShaderConverter PUBLIC
-    MoltenVK::Common spirv-cross SPIRV-Tools-static)
-
-  # MoltenVK — the core driver. .mm files compile with manual retain/release;
-  # don't let any inherited -fobjc-arc flag flip them.
-  file(GLOB_RECURSE _mvk_core_src
-    "MoltenVK/MoltenVK/MoltenVK/*.c"
-    "MoltenVK/MoltenVK/MoltenVK/*.cpp"
-    "MoltenVK/MoltenVK/MoltenVK/*.m"
-    "MoltenVK/MoltenVK/MoltenVK/*.mm")
-  add_library(MoltenVK STATIC ${_mvk_core_src})
-  target_include_directories(MoltenVK PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/include
-    PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/MoltenVK/API
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/MoltenVK/Commands
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/MoltenVK/GPUObjects
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/MoltenVK/Layers
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/MoltenVK/OS
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/MoltenVK/Utility
-    ${CMAKE_CURRENT_SOURCE_DIR}/MoltenVK/MoltenVK/MoltenVK/Vulkan
-    ${CMAKE_CURRENT_SOURCE_DIR}/cereal/include
-    ${CMAKE_CURRENT_BINARY_DIR}/MoltenVK-gen)
-  # Unquoted: MoltenVK runs MVK_STRINGIFY on this and compares to
-  # "$MAJOR.$MINOR.$PATCH" — quotes here would survive into the stringify.
-  target_compile_definitions(MoltenVK PUBLIC
-    MVK_FRAMEWORK_VERSION=1.4.2)
-  target_link_libraries(MoltenVK PUBLIC
-    MoltenVK::ShaderConverter
-    "-framework Foundation"
-    "-framework Metal"
-    "-framework AppKit"
-    "-framework IOKit"
-    "-framework IOSurface"
-    "-framework QuartzCore"
-    "-framework CoreGraphics")
-  # MoltenVK's OS/ TUs define Objective-C categories on MTLSamplerDescriptor,
-  # MTLRenderPipelineDescriptor, CAMetalLayer, and NSString. Static archive
-  # members that only contribute categories are dropped by ld (no external
-  # symbol references them), so at runtime calls like setBorderColorMVK: raise
-  # "unrecognized selector". Force-load the archive so every member ships in
-  # the final binary.
-  target_link_options(MoltenVK INTERFACE
-    "LINKER:-force_load,$<TARGET_FILE:MoltenVK>")
-endif()
-
-# ==============================================================================
-# xenia-shader-cc (build-time host tool: GLSL/XeSL -> SPIR-V -> .h, and on
-# Apple, XeSL -> MSL metallib -> .h via xcrun metal)
-# ==============================================================================
-if(NOT _xe_use_host_shader_cc)
-
-add_executable(xenia-shader-cc ${PROJECT_SOURCE_DIR}/tools/build/shader_cc.cc)
-target_link_libraries(xenia-shader-cc PRIVATE glslang SPIRV-Tools-static)
-target_include_directories(xenia-shader-cc PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/glslang/StandAlone)
-set_target_properties(xenia-shader-cc PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/host_tools")
-if(APPLE)
-  target_compile_definitions(xenia-shader-cc PRIVATE
-    XE_SHADER_CC_METAL=1
-    XE_METAL_MIN_OS="${CMAKE_OSX_DEPLOYMENT_TARGET}")
-endif()
-if(MSVC)
-  target_compile_options(xenia-shader-cc PRIVATE /EHsc)
-endif()
-
-else()  # _xe_use_host_shader_cc: x64→ARM64 cross-compile, use native build's binary
-
-# Native x64 build lives at <repo>/build/ (xenia-build.py: get_build_dir(None)).
-set(_xe_host_shader_cc_dir "${CMAKE_SOURCE_DIR}/build/host_tools")
-set(_xe_host_shader_cc_any "")
-foreach(_cfg Release Checked Debug)
-  if(EXISTS "${_xe_host_shader_cc_dir}/${_cfg}/xenia-shader-cc.exe")
-    set(_xe_host_shader_cc_any "${_xe_host_shader_cc_dir}/${_cfg}/xenia-shader-cc.exe")
-    break()
-  endif()
-endforeach()
-if(NOT _xe_host_shader_cc_any)
-  message(FATAL_ERROR
-    "Cross-compile to ARM64 needs a host xenia-shader-cc.exe but none was found "
-    "under ${_xe_host_shader_cc_dir}/<Config>/.\n"
-    "  Run a native build first to produce it, e.g.:\n"
-    "    xb build --target xenia-shader-cc --config=release\n"
-    "  Then re-run the cross-compile.")
-endif()
-add_executable(xenia-shader-cc IMPORTED GLOBAL)
-set_target_properties(xenia-shader-cc PROPERTIES
-  IMPORTED_LOCATION "${_xe_host_shader_cc_any}"
-  IMPORTED_LOCATION_RELEASE "${_xe_host_shader_cc_dir}/Release/xenia-shader-cc.exe"
-  IMPORTED_LOCATION_CHECKED "${_xe_host_shader_cc_dir}/Checked/xenia-shader-cc.exe"
-  IMPORTED_LOCATION_DEBUG "${_xe_host_shader_cc_dir}/Debug/xenia-shader-cc.exe")
-
+  target_include_directories(glslang-spirv PUBLIC glslang)
 endif()
 
 # ==============================================================================
@@ -466,12 +171,6 @@ add_library(imgui STATIC
   imgui/imgui_widgets.cpp
 )
 target_include_directories(imgui PUBLIC imgui PRIVATE stb)
-
-# ==============================================================================
-# miniaudio (header-only)
-# ==============================================================================
-add_library(miniaudio INTERFACE)
-target_include_directories(miniaudio INTERFACE miniaudio)
 
 # ==============================================================================
 # mspack
@@ -613,7 +312,7 @@ if(XE_TARGET_AARCH64)
     WITH_GZFILEOP
   )
   if(NOT MSVC)
-    target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL HAVE_ATTRIBUTE_ALIGNED)
+    target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL)
   endif()
 else()
   file(GLOB _zlibng_x86 "zlib-ng/arch/x86/*.c")
@@ -636,9 +335,8 @@ else()
   if(NOT MSVC)
     # GCC/Clang have native __builtin_ctz/__builtin_ctzll (MSVC gets these
     # from fallback_builtins.h). Defining these enables optimized compare256
-    # and longest_match codepaths. HAVE_ATTRIBUTE_ALIGNED gates GCC-style
-    # __attribute__((aligned)); MSVC uses __declspec(align) via its fallback.
-    target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL HAVE_ATTRIBUTE_ALIGNED)
+    # and longest_match codepaths.
+    target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL)
     # GCC/Clang need per-file ISA flags; MSVC handles this via runtime dispatch
     set_source_files_properties(
       zlib-ng/arch/x86/adler32_avx2.c
@@ -686,84 +384,89 @@ if(WIN32)
 endif()
 
 # ==============================================================================
-# SDL3
+# SDL2
 # ==============================================================================
-# Build SDL3 from source on every platform using upstream's own CMake. Xenia
-# drives windowing/rendering/GPU directly, so the SDL subsystems we don't
-# consume are switched off. Only audio + joystick/gamepad/haptic + events are
-# exercised by xenia-apu-sdl / xenia-hid-sdl. Linux builds shared so the
-# runtime dlopen("libSDL3.so.0") path in system_gnulinux.cc can resolve and so
-# linuxdeploy can bundle the .so into the AppImage; Windows/macOS build static.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set(SDL_SHARED ON CACHE INTERNAL "")
-  set(SDL_STATIC OFF CACHE INTERNAL "")
-else()
-  set(SDL_SHARED OFF CACHE INTERNAL "")
-  set(SDL_STATIC ON CACHE INTERNAL "")
-endif()
-set(SDL_TEST_LIBRARY OFF CACHE INTERNAL "")
-set(SDL_INSTALL OFF CACHE INTERNAL "")
-set(SDL_DISABLE_INSTALL ON CACHE INTERNAL "")
-set(SDL_CAMERA OFF CACHE INTERNAL "")
-set(SDL_DIALOG OFF CACHE INTERNAL "")
-set(SDL_GPU OFF CACHE INTERNAL "")
-set(SDL_RENDER OFF CACHE INTERNAL "")
-set(SDL_SENSOR OFF CACHE INTERNAL "")
-set(SDL_HIDAPI_LIBUSB OFF CACHE INTERNAL "")
-
-# SDL3's sdlcommands.cmake uses file(GLOB CONFIGURE_DEPENDS ...) for its
-# source lists. CMake honours that by emitting a "Re-checking globbed
-# directories" probe on every build — slow and pointless for a submodule
-# pinned to a release tag. Strip the flag in place at configure time;
-# .gitmodules marks SDL3 as ignore=dirty so the in-tree edit doesn't pollute
-# git status. Same pattern as snappy and zlib-ng.
-set(_sdl3_cmd "${CMAKE_CURRENT_SOURCE_DIR}/SDL3/cmake/sdlcommands.cmake")
-if(EXISTS "${_sdl3_cmd}")
-  file(READ "${_sdl3_cmd}" _sdl3_cmd_content)
-  string(REPLACE " CONFIGURE_DEPENDS " " " _sdl3_cmd_patched "${_sdl3_cmd_content}")
-  if(NOT "${_sdl3_cmd_patched}" STREQUAL "${_sdl3_cmd_content}")
-    file(WRITE "${_sdl3_cmd}" "${_sdl3_cmd_patched}")
-  endif()
-endif()
-
-# SDL3's target_precompile_headers emits /Yu on MSVC, which sccache cannot
-# cache. Disable PCH so each source compiles standalone and caches across CI.
-set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
-# SDL3 puts /GL- on SDL_mslibc.c to keep its hand-written memcpy out of
-# whole-program opt. Our inherited Release /GL then trips D9025, so drop /GL
-# for the SDL3 subtree and restore it afterward.
-get_directory_property(_xe_save_opts COMPILE_OPTIONS)
-set(_xe_sdl_opts "${_xe_save_opts}")
-list(FILTER _xe_sdl_opts EXCLUDE REGEX "/GL>$")
-set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "${_xe_sdl_opts}")
-add_subdirectory(SDL3 EXCLUDE_FROM_ALL)
-set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "${_xe_save_opts}")
-# Consistent target name for downstream link calls.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  add_library(SDL3 ALIAS SDL3-shared)
-else()
-  add_library(SDL3 ALIAS SDL3-static)
-endif()
-
-# SDL3 explicitly bakes /W3 into its target COMPILE_OPTIONS, which clashes
-# with the directory-level /W0 above and produces D9025 noise on every TU.
-# Strip the /W* and /WX flags it added so only the directory-level /W0
-# survives. Mirrors the same workaround we apply to SPIRV-Tools.
-if(MSVC)
-  foreach(_sdl3_target SDL3-static SDL_uclibc)
-    if(TARGET ${_sdl3_target})
-      get_target_property(_opts ${_sdl3_target} COMPILE_OPTIONS)
-      if(_opts)
-        list(FILTER _opts EXCLUDE REGEX "^/[Ww]([0-9]|all|X)$")
-        set_target_properties(${_sdl3_target} PROPERTIES COMPILE_OPTIONS "${_opts}")
-      endif()
-    endif()
-  endforeach()
+if(WIN32)
+  # Build SDL2 from source on Windows
+  file(GLOB _sdl2_sources
+    "SDL2/src/*.c"
+    "SDL2/src/atomic/*.c"
+    "SDL2/src/audio/*.c"
+    "SDL2/src/audio/directsound/*.c"
+    "SDL2/src/audio/disk/*.c"
+    "SDL2/src/audio/dummy/*.c"
+    "SDL2/src/audio/wasapi/*.c"
+    "SDL2/src/audio/winmm/*.c"
+    "SDL2/src/core/windows/*.c"
+    "SDL2/src/cpuinfo/*.c"
+    "SDL2/src/dynapi/*.c"
+    "SDL2/src/events/*.c"
+    "SDL2/src/file/*.c"
+    "SDL2/src/filesystem/windows/*.c"
+    "SDL2/src/haptic/*.c"
+    "SDL2/src/haptic/dummy/*.c"
+    "SDL2/src/haptic/windows/*.c"
+    "SDL2/src/hidapi/*.c"
+    "SDL2/src/joystick/*.c"
+    "SDL2/src/joystick/dummy/*.c"
+    "SDL2/src/joystick/hidapi/*.c"
+    "SDL2/src/joystick/virtual/*.c"
+    "SDL2/src/joystick/windows/*.c"
+    "SDL2/src/libm/*.c"
+    "SDL2/src/loadso/windows/*.c"
+    "SDL2/src/locale/*.c"
+    "SDL2/src/locale/windows/*.c"
+    "SDL2/src/misc/*.c"
+    "SDL2/src/misc/windows/*.c"
+    "SDL2/src/power/*.c"
+    "SDL2/src/power/windows/*.c"
+    "SDL2/src/render/*.c"
+    "SDL2/src/render/direct3d/*.c"
+    "SDL2/src/render/direct3d11/*.c"
+    "SDL2/src/render/direct3d12/*.c"
+    "SDL2/src/render/opengl/*.c"
+    "SDL2/src/render/opengles2/*.c"
+    "SDL2/src/render/software/*.c"
+    "SDL2/src/sensor/*.c"
+    "SDL2/src/sensor/dummy/*.c"
+    "SDL2/src/sensor/windows/*.c"
+    "SDL2/src/stdlib/*.c"
+    "SDL2/src/thread/*.c"
+    "SDL2/src/thread/generic/SDL_syscond.c"
+    "SDL2/src/thread/windows/*.c"
+    "SDL2/src/timer/*.c"
+    "SDL2/src/timer/windows/*.c"
+    "SDL2/src/video/*.c"
+    "SDL2/src/video/dummy/*.c"
+    "SDL2/src/video/windows/*.c"
+    "SDL2/src/video/yuv2rgb/*.c"
+  )
+  add_library(SDL2 STATIC ${_sdl2_sources})
+  target_compile_definitions(SDL2 PRIVATE
+    HAVE_LIBC
+    SDL_LEAN_AND_MEAN
+    SDL_RENDER_DISABLED
+  )
+  target_include_directories(SDL2 PUBLIC SDL2/include)
+  target_link_libraries(SDL2 PRIVATE setupapi winmm imm32 version)
+elseif(APPLE)
+  # Use system SDL2 framework on macOS
+  add_library(SDL2 INTERFACE)
+  find_library(SDL2_LIBRARY SDL2 REQUIRED)
+  target_include_directories(SDL2 INTERFACE "${SDL2_LIBRARY}/Headers")
+  target_link_libraries(SDL2 INTERFACE "${SDL2_LIBRARY}")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # Use system SDL2 on Linux
+  add_library(SDL2 INTERFACE)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(SDL2_PKG REQUIRED sdl2)
+  target_include_directories(SDL2 INTERFACE ${SDL2_PKG_INCLUDE_DIRS})
+  target_link_libraries(SDL2 INTERFACE ${SDL2_PKG_LDFLAGS})
+  target_compile_options(SDL2 INTERFACE ${SDL2_PKG_CFLAGS_OTHER})
 endif()
 
 # ==============================================================================
-# FFmpeg — upstream source lives in the FFmpeg submodule; xenia's static
-# config.h / asm configuration overlay lives in ffmpeg-xenia alongside it.
+# FFmpeg (source in FFmpeg submodule, config overlay in ffmpeg-xenia)
 # ==============================================================================
 set(XE_HAS_GAS_ASM FALSE)
 if(XE_TARGET_AARCH64)
@@ -826,8 +529,7 @@ function(xe_add_gas_sources target)
   endforeach()
 endfunction()
 
-# Shared FFmpeg settings applied to each libav* target (defines, include
-# paths, platform-specific link deps, warning suppression, C linkage).
+# Common function to apply shared FFmpeg settings to a target.
 function(ffmpeg_common target)
   target_compile_definitions(${target} PRIVATE
     HAVE_AV_CONFIG_H
@@ -843,8 +545,7 @@ function(ffmpeg_common target)
       ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg/compat/atomics/win32
     )
     target_link_libraries(${target} PRIVATE bcrypt)
-    # FFmpeg in unoptimized builds emits so much dead code that link time
-    # blows up; /Os keeps Debug and Checked within sane limits.
+    # Size optimization on Debug/Checked (dead code elimination is mandatory)
     target_compile_options(${target} PRIVATE
       $<$<CONFIG:Debug>:/Os>
       $<$<CONFIG:Checked>:/Os>
@@ -853,15 +554,9 @@ function(ffmpeg_common target)
     target_include_directories(${target} PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg/compat/atomics/gcc
     )
-    # glibc POSIX feature macros — FFmpeg assumes them for certain
-    # syscalls and string extensions.
-    target_compile_definitions(${target} PRIVATE
-      _GNU_SOURCE
-      _POSIX_C_SOURCE=200809L
-      _XOPEN_SOURCE=700
-    )
   endif()
 
+  # Suppress all warnings for FFmpeg code
   if(MSVC)
     target_compile_options(${target} PRIVATE /w)
   else()
@@ -1091,9 +786,6 @@ target_include_directories(libavcodec PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg/libavcodec
 )
 target_link_libraries(libavcodec PRIVATE libavutil)
-if(APPLE)
-  target_link_libraries(libavcodec PRIVATE iconv)
-endif()
 ffmpeg_common(libavcodec)
 
 # --- libavformat ---
@@ -1134,239 +826,3 @@ if(WIN32)
 endif()
 target_link_libraries(libavformat PRIVATE libavutil libavcodec)
 ffmpeg_common(libavformat)
-
-# ==============================================================================
-# wxWidgets
-# ==============================================================================
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
-    # Build from vendored source — matches what we ship on Windows/macOS, and
-    # on Linux gives us a known-good 3.3 (system 3.2 has GTK3/Wayland issues).
-    # Strip the directory-level /W0 (or -w) so wxWidgets's own /W3 doesn't
-    # spam D9025 "overriding /W0 with /W3", but keep everything else (e.g.
-    # /utf-8) so wxWidgets's UTF-8 source files compile cleanly under
-    # non-Latin code pages (CP932 → C4819 in languageinfo.cpp otherwise).
-    get_directory_property(_xe_save_thirdparty_options COMPILE_OPTIONS)
-    set(_xe_wx_options "${_xe_save_thirdparty_options}")
-    list(FILTER _xe_wx_options EXCLUDE REGEX "^(/W[0-4]|-w)$")
-    set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "${_xe_wx_options}")
-    if(MSVC)
-      string(REGEX REPLACE " */W[0-4]" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
-      string(REGEX REPLACE " */W[0-4]" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-    endif()
-    if(UNIX)
-      set(wxUSE_ZLIB sys CACHE STRING "" FORCE)
-      set(wxUSE_EXPAT sys CACHE STRING "" FORCE)
-      # Resolve in this scope so the imported targets propagate to wx (its
-      # nested find_package calls would otherwise create them in wx's
-      # subdirectory scope, out of reach of the fixup below).
-      find_package(OpenGL REQUIRED)
-      find_package(ZLIB REQUIRED)
-      find_package(EXPAT REQUIRED)
-      # Tag bare IMPORTED_LOCATION imports with Release before wx is added —
-      # wx references these targets during its own configure pass, where
-      # CMAKE_MAP_IMPORTED_CONFIG_DEBUG="Release;NOCONFIG" can't resolve a
-      # target that has no IMPORTED_CONFIGURATIONS.
-      get_property(_xe_thirdparty_imports DIRECTORY PROPERTY IMPORTED_TARGETS)
-      foreach(_xe_imp ${_xe_thirdparty_imports})
-        get_target_property(_xe_imp_loc ${_xe_imp} IMPORTED_LOCATION)
-        if(_xe_imp_loc AND NOT _xe_imp_loc MATCHES "-NOTFOUND$")
-          get_target_property(_xe_imp_confs ${_xe_imp} IMPORTED_CONFIGURATIONS)
-          if(NOT _xe_imp_confs OR _xe_imp_confs MATCHES "-NOTFOUND$")
-            set_target_properties(${_xe_imp} PROPERTIES
-              IMPORTED_CONFIGURATIONS "Release"
-              IMPORTED_LOCATION_RELEASE "${_xe_imp_loc}"
-            )
-          endif()
-        endif()
-      endforeach()
-    endif()
-    set(wxBUILD_SHARED OFF CACHE BOOL "" FORCE)
-    set(wxBUILD_INSTALL OFF CACHE BOOL "" FORCE)
-    set(wxBUILD_SAMPLES OFF CACHE BOOL "" FORCE)
-    set(wxBUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(wxBUILD_DEMOS OFF CACHE BOOL "" FORCE)
-    set(wxBUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-    # PCH (/Yu) and /MP make every wx TU non-cacheable under sccache on MSVC.
-    # Disable both so each source compiles standalone and the stable wx objects
-    # cache across CI runs.
-    set(wxBUILD_PRECOMP OFF CACHE BOOL "" FORCE)
-    set(wxBUILD_MSVC_MULTIPROC OFF CACHE BOOL "" FORCE)
-    set(wxUSE_WEBVIEW OFF CACHE BOOL "" FORCE)
-    set(wxUSE_MEDIACTRL OFF CACHE BOOL "" FORCE)
-    set(wxUSE_RICHTEXT OFF CACHE BOOL "" FORCE)
-    set(wxUSE_RIBBON OFF CACHE BOOL "" FORCE)
-    set(wxUSE_PROPGRID OFF CACHE BOOL "" FORCE)
-    set(wxUSE_AUI ON CACHE BOOL "" FORCE)
-    set(wxUSE_STC OFF CACHE BOOL "" FORCE)
-    set(wxUSE_HTML OFF CACHE BOOL "" FORCE)
-    set(wxUSE_XRC OFF CACHE BOOL "" FORCE)
-    set(wxUSE_PRINTING_ARCHITECTURE OFF CACHE BOOL "" FORCE)
-    set(wxUSE_HELP OFF CACHE BOOL "" FORCE)
-    set(wxUSE_MS_HTML_HELP OFF CACHE BOOL "" FORCE)
-    set(wxUSE_WXHTML_HELP OFF CACHE BOOL "" FORCE)
-    set(wxUSE_DEBUGREPORT OFF CACHE BOOL "" FORCE)
-    set(wxUSE_SOCKETS OFF CACHE BOOL "" FORCE)
-    set(wxUSE_PROTOCOL OFF CACHE BOOL "" FORCE)
-    set(wxUSE_URL OFF CACHE BOOL "" FORCE)
-    set(wxUSE_FS_INET OFF CACHE BOOL "" FORCE)
-    set(wxUSE_FS_ARCHIVE OFF CACHE BOOL "" FORCE)
-    set(wxUSE_FS_ZIP OFF CACHE BOOL "" FORCE)
-    set(wxUSE_SOUND OFF CACHE BOOL "" FORCE)
-    set(wxUSE_LIBTIFF OFF CACHE BOOL "" FORCE)
-    set(wxUSE_LIBJPEG OFF CACHE BOOL "" FORCE)
-    set(wxUSE_LIBWEBP OFF CACHE BOOL "" FORCE)
-    set(wxUSE_NANOSVG OFF CACHE BOOL "" FORCE)
-    add_subdirectory(wxWidgets)
-    if(WIN32)
-      # Generic file dialog (not built by default on MSW) — used as a Wine
-      # fallback in file_picker_wx.cc since the native Win32 dialog stalls
-      # under Wine for arbitrary input.
-      target_sources(wxcore PRIVATE
-          ${CMAKE_CURRENT_SOURCE_DIR}/wxWidgets/src/generic/filedlgg.cpp)
-    endif()
-    # Walk the wx subdirectory tree to apply per-target fixups: rewrite the
-    # MSVC runtime so wx links the same CRT we pin (LNK2038 otherwise — wx's
-    # functions.cmake sets MSVC_RUNTIME_LIBRARY per target, shadowing our
-    # CMake-wide setting), and append -w on clang/gcc to suppress the
-    # -Wall/-Wundef/-Wunused-parameter wx adds via target_compile_options
-    # (the equivalent DEFAULT_WARNINGS opt-out is a function arg, not a cache
-    # variable, so we can't reach it from here without patching wx).
-    set(_xe_wx_dirs "${CMAKE_CURRENT_SOURCE_DIR}/wxWidgets")
-    set(_xe_wx_targets "")
-    while(_xe_wx_dirs)
-      list(POP_FRONT _xe_wx_dirs _xe_wx_dir)
-      get_property(_xe_dir_targets DIRECTORY "${_xe_wx_dir}"
-                   PROPERTY BUILDSYSTEM_TARGETS)
-      list(APPEND _xe_wx_targets ${_xe_dir_targets})
-      get_property(_xe_subdirs DIRECTORY "${_xe_wx_dir}"
-                   PROPERTY SUBDIRECTORIES)
-      list(APPEND _xe_wx_dirs ${_xe_subdirs})
-    endwhile()
-    foreach(_xe_t ${_xe_wx_targets})
-      get_target_property(_xe_t_type ${_xe_t} TYPE)
-      if(_xe_t_type STREQUAL "INTERFACE_LIBRARY"
-          OR _xe_t_type STREQUAL "UTILITY")
-        continue()
-      endif()
-      if(MSVC)
-        set_target_properties(${_xe_t} PROPERTIES
-          MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-      else()
-        target_compile_options(${_xe_t} PRIVATE -w)
-      endif()
-      # Strip wx's asserts in Release. wx defaults wxDEBUG_LEVEL to 1 in every
-      # config; under Ninja Multi-Config we apply the override per-target so
-      # the generator expression is evaluated at build time.
-      target_compile_definitions(${_xe_t} PRIVATE
-          $<$<CONFIG:Release>:wxDEBUG_LEVEL=0>)
-    endforeach()
-    set_property(DIRECTORY PROPERTY COMPILE_OPTIONS
-        "${_xe_save_thirdparty_options}")
-    add_library(xe-wxWidgets INTERFACE)
-    target_link_libraries(xe-wxWidgets INTERFACE wx::aui wx::adv wx::core wx::base)
-    # Consumers including wx headers must agree on wxDEBUG_LEVEL with the
-    # compiled wx libraries to keep inline assert expansions consistent.
-    target_compile_definitions(xe-wxWidgets INTERFACE
-        $<$<CONFIG:Release>:wxDEBUG_LEVEL=0>)
-endif()
-
-# spirv_to_dxil (Mesa, NIR based SPIR-V to DXIL) is the sole D3D12 guest shader
-# backend. Mesa is meson only, so it is built out of tree by meson and linked
-# statically into the exe (no runtime DLL, matching the rest of xenia).
-# libspirv_to_dxil.a does not bundle its deps, so we link the whole archive set
-# (nir, vtn, compiler, dxil_compiler, util, blake3, zlib). Built once as release
-# to match xenia's /MD CRT in every config. Only the D3D12 backend (Windows)
-# consumes it, so the build is gated on WIN32.
-#
-# The meson setup must run in an MSVC environment so meson detects cl. Verify the
-# archive paths below against the real build output if Mesa is restructured.
-if(WIN32)
-  # Mesa source tree built for spirv_to_dxil. Defaults to the third_party/mesa
-  # submodule (our fork with the barycentric, linking, keep_io_vars and FSI->ROV
-  # changes). Repoint this cache variable to build a different Mesa checkout.
-  get_filename_component(_xe_mesa_default
-      "${CMAKE_SOURCE_DIR}/third_party/mesa" ABSOLUTE)
-  set(XENIA_MESA_SOURCE_DIR "${_xe_mesa_default}" CACHE PATH
-      "Mesa source tree built for spirv_to_dxil")
-  set(_xe_mesa_dir "${XENIA_MESA_SOURCE_DIR}")
-  if(NOT EXISTS "${_xe_mesa_dir}/meson.build")
-    message(FATAL_ERROR
-      "The D3D12 backend requires a Mesa tree at ${_xe_mesa_dir} for "
-      "spirv_to_dxil. Run: git submodule update --init third_party/mesa "
-      "(or set XENIA_MESA_SOURCE_DIR to your Mesa checkout).")
-  endif()
-  find_program(XE_MESON_EXECUTABLE meson)
-  find_program(XE_NINJA_EXECUTABLE ninja)
-  if(NOT XE_MESON_EXECUTABLE OR NOT XE_NINJA_EXECUTABLE)
-    message(FATAL_ERROR
-      "spirv_to_dxil needs meson>=1.4 and ninja on PATH (and the python mako "
-      "module). meson=${XE_MESON_EXECUTABLE} ninja=${XE_NINJA_EXECUTABLE}")
-  endif()
-
-  set(_xe_s2d_build "${CMAKE_BINARY_DIR}/third_party/mesa-build")
-  set(_xe_s2d_main "${_xe_s2d_build}/src/microsoft/spirv_to_dxil/libspirv_to_dxil.a")
-  # Dependency archives, in the layout meson emits under the build tree.
-  set(_xe_s2d_deps
-    "${_xe_s2d_build}/src/microsoft/compiler/libdxil_compiler.a"
-    "${_xe_s2d_build}/src/compiler/spirv/libvtn.a"
-    "${_xe_s2d_build}/src/compiler/nir/libnir.a"
-    "${_xe_s2d_build}/src/compiler/libcompiler.a"
-    "${_xe_s2d_build}/src/util/libmesa_util.a"
-    "${_xe_s2d_build}/src/util/libmesa_util_simd.a"
-    "${_xe_s2d_build}/src/c11/impl/libmesa_util_c11.a"
-    "${_xe_s2d_build}/src/util/blake3/libblake3.a"
-    "${_xe_s2d_build}/subprojects/zlib-1.3.1/libz.a")
-
-  # We only static-link the archives above; spirv_to_dxil is a both_libraries()
-  # target, so a full "meson compile" also links spirv_to_dxil.dll and builds
-  # the spirv2dxil.exe tool, neither of which we consume. Drive ninja against
-  # exactly the archive outputs instead (each pulls in its own objects and
-  # codegen), skipping the dll link and the exe. Ninja matches target names
-  # relative to the build dir, so strip the absolute prefix.
-  set(_xe_s2d_ninja_targets "")
-  foreach(_xe_ar IN LISTS _xe_s2d_main _xe_s2d_deps)
-    file(RELATIVE_PATH _xe_ar_rel "${_xe_s2d_build}" "${_xe_ar}")
-    list(APPEND _xe_s2d_ninja_targets "${_xe_ar_rel}")
-  endforeach()
-
-  include(ExternalProject)
-  # Wipe then setup keeps the configure step idempotent across reconfigures.
-  # /wd4189 overrides mesa's /we4189: Release strips asserts, leaving assert-only
-  # locals that would otherwise trip the promoted warning as an error.
-  ExternalProject_Add(mesa_spirv_to_dxil
-    SOURCE_DIR "${_xe_mesa_dir}"
-    CONFIGURE_COMMAND
-      "${CMAKE_COMMAND}" -E rm -rf "${_xe_s2d_build}"
-      COMMAND "${XE_MESON_EXECUTABLE}" setup "${_xe_s2d_build}" "${_xe_mesa_dir}"
-        --default-library=static --buildtype=release -Db_vscrt=md
-        -Dc_args=/wd4189 -Dcpp_args=/wd4189
-        -Dspirv-to-dxil=true
-        -Dgallium-drivers= -Dvulkan-drivers= -Dplatforms=
-        -Dglx=disabled -Degl=disabled -Dgbm=disabled
-        -Dopengl=false -Dgles1=disabled -Dgles2=disabled
-        -Dllvm=disabled -Dvideo-codecs=
-    BUILD_COMMAND "${XE_NINJA_EXECUTABLE}" -C "${_xe_s2d_build}"
-      ${_xe_s2d_ninja_targets}
-    INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS "${_xe_s2d_main}" ${_xe_s2d_deps}
-    # Editable source tree, so re-run ninja every build. It is incremental and
-    # cheap when nothing changed, and picks up local Mesa edits.
-    BUILD_ALWAYS ON
-    USES_TERMINAL_BUILD ON)
-
-  add_library(spirv_to_dxil STATIC IMPORTED GLOBAL)
-  add_dependencies(spirv_to_dxil mesa_spirv_to_dxil)
-  # Built release once. synchronization/version are the only non-default system
-  # libs Mesa needs.
-  set_target_properties(spirv_to_dxil PROPERTIES
-    IMPORTED_LOCATION "${_xe_s2d_main}"
-    INTERFACE_INCLUDE_DIRECTORIES
-      "${_xe_mesa_dir}/src/microsoft/spirv_to_dxil;${_xe_mesa_dir}/src/microsoft/compiler"
-    INTERFACE_LINK_LIBRARIES "${_xe_s2d_deps};synchronization;version")
-  # Multi-Config evaluates every config, so point each at the same archive.
-  foreach(_xe_cfg IN LISTS CMAKE_CONFIGURATION_TYPES)
-    string(TOUPPER "${_xe_cfg}" _xe_cfg_u)
-    set_target_properties(spirv_to_dxil PROPERTIES
-      IMPORTED_LOCATION_${_xe_cfg_u} "${_xe_s2d_main}")
-  endforeach()
-endif()

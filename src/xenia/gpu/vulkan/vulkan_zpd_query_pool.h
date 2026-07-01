@@ -32,15 +32,14 @@ class DeferredCommandBuffer;
 // results are copied to a persistent buffer via vkCmdCopyQueryPoolResults.
 // vkCmdBeginQuery is only valid inside a render pass, queries get deferred
 // when no pass is open and segments split at pass boundaries.
+//
 // Requires VK_EXT_host_query_reset (1.2 core) so slots can be reset on the
 // CPU at release time, no paired vkCmdEndQuery needed, and also allows
-// DiscardHostZPDQuery work outside a pass.
+// DiscardZPDQuery work outside a pass.
 //
 // VK_QUERY_RESULT_WAIT_BIT in the copy removes the need for a separate
 // availability check. Transfer barrier before InvalidateReadback covers non-
 // coherent memory.
-//
-// Per-slot generation counter has same purpose as D3D12 pool.
 class VulkanZPDQueryPool {
  public:
   VulkanZPDQueryPool() = default;
@@ -53,13 +52,13 @@ class VulkanZPDQueryPool {
                          bool initialize_fsi_counter = false);
   void Shutdown();
 
-  bool is_initialized() const {
+  bool fbo_initialized() const {
     return query_pool_ != VK_NULL_HANDLE &&
            readback_buffer_ != VK_NULL_HANDLE && readback_mapping_ != nullptr &&
            capacity_ != 0;
   }
 
-  bool fsi_counter_initialized() const {
+  bool fsi_initialized() const {
     return fsi_counter_buffer_ != VK_NULL_HANDLE &&
            fsi_counter_memory_ != VK_NULL_HANDLE &&
            fsi_counter_readback_buffer_ != VK_NULL_HANDLE &&

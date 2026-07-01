@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "xenia/base/cvar.h"
 #include "xenia/gpu/shared_memory.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/memory.h"

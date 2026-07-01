@@ -1451,7 +1451,6 @@ enum class Opcode : uint32_t {
   kRetC = 63,
   kRoundNE = 64,
   kRoundNI = 65,
-  kRoundPI = 66,
   kRoundZ = 67,
   kRSq = 68,
   kSampleL = 72,
@@ -1895,10 +1894,6 @@ class Assembler {
   }
   void OpRoundNI(const Dest& dest, const Src& src, bool saturate = false) {
     EmitAluOp(Opcode::kRoundNI, 0b0, dest, src, saturate);
-    ++stat_.float_instruction_count;
-  }
-  void OpRoundPI(const Dest& dest, const Src& src, bool saturate = false) {
-    EmitAluOp(Opcode::kRoundPI, 0b0, dest, src, saturate);
     ++stat_.float_instruction_count;
   }
   void OpRoundZ(const Dest& dest, const Src& src, bool saturate = false) {
