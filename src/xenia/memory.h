@@ -58,13 +58,6 @@ enum MemoryProtectFlag : uint32_t {
   kMemoryProtectNoAccess = 0,
 };
 
-// Write-combine memory is CPU-writable (for GPU uploads), so treat it
-// as writable alongside the regular write flag.
-inline bool IsWritableProtect(uint32_t protect) {
-  return (protect & kMemoryProtectWrite) ||
-         (protect & kMemoryProtectWriteCombine);
-}
-
 // Equivalent to the Win32 MEMORY_BASIC_INFORMATION struct.
 struct HeapAllocationInfo {
   // A pointer to the base address of the region of pages.
@@ -292,10 +285,6 @@ class PhysicalHeap : public BaseHeap {
   void EnableAccessCallbacks(uint32_t physical_address, uint32_t length,
                              bool enable_invalidation_notifications,
                              bool enable_data_providers);
-  // Raw guest protection bits for the physical page in this heap (0 if it
-  // doesn't map here), and that decoded to a PageAccess.
-  uint32_t GetPageProtect(uint32_t physical_address);
-  xe::memory::PageAccess GetPageAccess(uint32_t physical_address);
   template <bool enable_invalidation_notifications>
   XE_NOINLINE void EnableAccessCallbacksInner(
       const uint32_t system_page_first, const uint32_t system_page_last,
@@ -310,12 +299,8 @@ class PhysicalHeap : public BaseHeap {
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
   uint32_t SystemPagenumToGuestPagenum(uint32_t num) const {
-    uint32_t system_base = num << system_page_shift_;
-    uint32_t offset = host_address_offset();
-    if (system_base < offset) {
-      return 0;
-    }
-    return (system_base - offset) >> page_size_shift_;
+    return ((num << system_page_shift_) - host_address_offset()) >>
+           page_size_shift_;
   }
 
   uint32_t GuestPagenumToSystemPagenum(uint32_t num) {
@@ -522,12 +507,6 @@ class Memory {
       uint32_t physical_address, uint32_t length,
       bool enable_invalidation_notifications, bool enable_data_providers);
 
-  // Most-permissive access for the physical page across the physical windows:
-  // kNoAccess (mapped in none of them), kReadOnly (readable but not writable in
-  // any), or kReadWrite (writable in at least one, so a write watch can catch
-  // it).
-  xe::memory::PageAccess GetPhysicalPageWindowAccess(uint32_t physical_address);
-
   // Forces triggering of watch callbacks for a virtual address range if pages
   // are watched there and unwatching them. Returns whether any page was
   // watched. Must be called with global critical region locking depth of 1.
@@ -578,9 +557,6 @@ class Memory {
                                          void* context);
 
  private:
-#if XE_PLATFORM_MAC
-  int MapViewsMac();
-#endif
   int MapViews(uint8_t* mapping_base);
   void UnmapViews();
 

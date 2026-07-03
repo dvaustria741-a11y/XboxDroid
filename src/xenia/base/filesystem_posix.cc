@@ -70,11 +70,6 @@ std::filesystem::path GetExecutablePath() {
 }
 
 std::filesystem::path GetExecutableFolder() {
-  // When running from an AppImage use the AppImage directory instead of
-  // the temporary mount point
-  if (const char* appimage_path = std::getenv("APPIMAGE")) {
-    return std::filesystem::path(appimage_path).parent_path();
-  }
   return GetExecutablePath().parent_path();
 }
 
@@ -188,22 +183,32 @@ class PosixFileHandle : public FileHandle {
 
 std::unique_ptr<FileHandle> FileHandle::OpenExisting(
     const std::filesystem::path& path, uint32_t desired_access) {
-  // O_RDONLY/O_WRONLY/O_RDWR are a 2-bit access mode, not OR-able flags.
-  // Reduce to read/write intent, then pick the mode. kGenericExecute has no
-  // POSIX open equivalent and falls back to read.
-  const bool wants_read =
-      desired_access & (FileAccess::kGenericRead | FileAccess::kFileReadData |
-                        FileAccess::kGenericExecute | FileAccess::kGenericAll);
-  const bool wants_write =
-      desired_access & (FileAccess::kGenericWrite | FileAccess::kFileWriteData |
-                        FileAccess::kGenericAll);
-  int open_access;
-  if (wants_read && wants_write) {
+  int open_access = 0;
+  if (desired_access & FileAccess::kGenericRead) {
+    open_access |= O_RDONLY;
+  }
+  if (desired_access & FileAccess::kGenericWrite) {
+    open_access |= O_WRONLY;
+  }
+  if (desired_access & FileAccess::kGenericExecute) {
+    // Unsupported
+  }
+  if (desired_access & FileAccess::kFileReadData) {
+    open_access |= O_RDONLY;
+  }
+  if (desired_access & FileAccess::kFileWriteData) {
+    open_access |= O_WRONLY;
+  }
+  if (desired_access & FileAccess::kGenericRead &&
+      desired_access & FileAccess::kGenericWrite) {
     open_access = O_RDWR;
-  } else if (wants_write) {
-    open_access = O_WRONLY;
-  } else {
-    open_access = O_RDONLY;
+  }
+  if (desired_access & FileAccess::kFileReadData &&
+      desired_access & FileAccess::kFileWriteData) {
+    open_access = O_RDWR;
+  }
+  if (desired_access & FileAccess::kGenericAll) {
+    open_access = O_RDWR;
   }
   if (desired_access & FileAccess::kFileAppendData) {
     open_access |= O_APPEND;

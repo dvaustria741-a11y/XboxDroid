@@ -71,10 +71,7 @@ using namespace xe::cpu::hir;
 using xe::cpu::hir::Instr;
 
 typedef bool (*SequenceSelectFn)(X64Emitter&, const Instr*, InstrKeyValue ikey);
-std::unordered_map<uint32_t, SequenceSelectFn>& SequenceTable() {
-  static auto* table = new std::unordered_map<uint32_t, SequenceSelectFn>();
-  return *table;
-}
+std::unordered_map<uint32_t, SequenceSelectFn> sequence_table;
 
 // ============================================================================
 // OPCODE_COMMENT
@@ -389,7 +386,25 @@ struct CONVERT_F32_F64
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.ChangeMxcsrMode(MXCSRMode::Fpu);
     // TODO(benvanik): saturation check? cvtt* (trunc?)
-    e.vcvtsd2ss(i.dest, GetInputRegOrConstant(e, i.src1, e.xmm0));
+
+    Xbyak::Xmm src = GetInputRegOrConstant(e, i.src1, e.xmm0);
+    e.vmovq(e.rax, src);
+    e.vcvtsd2ss(i.dest, src);
+    Xbyak::Label done;
+    e.mov(e.rcx, e.rax);
+    e.btr(e.rcx, 63);
+    e.mov(e.rdx, e.GetXmmConstPtr(XMMDoubleInf));
+    e.cmp(e.rcx, e.rdx);
+    e.jbe(done);  // finite or +/-inf
+
+    // NaN: float quiet bit (22) -> double quiet bit (51)
+    e.vmovd(e.ecx, i.dest);
+    e.and_(e.ecx, ~(1u << 22));
+    e.shr(e.rax, 51 - 22);
+    e.and_(e.eax, 1u << 22);
+    e.or_(e.ecx, e.eax);
+    e.vmovd(i.dest, e.ecx);
+    e.L(done);
   }
 };
 struct CONVERT_F64_I64
@@ -410,7 +425,26 @@ struct CONVERT_F64_F32
     : Sequence<CONVERT_F64_F32, I<OPCODE_CONVERT, F64Op, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.ChangeMxcsrMode(MXCSRMode::Fpu);
-    e.vcvtss2sd(i.dest, GetInputRegOrConstant(e, i.src1, e.xmm0));
+    Xbyak::Xmm src = GetInputRegOrConstant(e, i.src1, e.xmm0);
+
+    e.vmovd(e.eax, src);
+    e.vcvtss2sd(i.dest, src);
+
+    Xbyak::Label done;
+    e.mov(e.ecx, e.eax);
+    e.and_(e.ecx, e.GetXmmConstPtr(XMMAbsMaskPS));
+    e.cmp(e.ecx, e.GetXmmConstPtr(XMMFloatInf));
+    e.jbe(done);
+
+    // NaN: double quiet bit (51) -> float quiet bit (22)
+    e.vmovq(e.rcx, i.dest);
+    e.btr(e.rcx, 51);  // clear the bit the convert forced to 1
+    e.shr(e.eax, 22);
+    e.and_(e.eax, 1);
+    e.shl(e.rax, 51);
+    e.or_(e.rcx, e.rax);
+    e.vmovq(i.dest, e.rcx);
+    e.L(done);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_CONVERT, CONVERT_I32_F32, CONVERT_I32_F64,
@@ -2181,8 +2215,7 @@ struct RECIP_F32 : Sequence<RECIP_F32, I<OPCODE_RECIP, F32Op, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.ChangeMxcsrMode(MXCSRMode::Fpu);
     Xmm src1 = GetInputRegOrConstant(e, i.src1, e.xmm3);
-    // Note: AVX512's vrcp14ss has precision issues
-    // For now, always use division which gives exact results
+    // AVX512's vrcp14ss has precision issues, division gives exact results
     e.vmovaps(e.xmm0, e.GetXmmConstPtr(XMMOne));
     e.vdivss(i.dest, e.xmm0, src1);
   }
@@ -2191,8 +2224,7 @@ struct RECIP_F64 : Sequence<RECIP_F64, I<OPCODE_RECIP, F64Op, F64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.ChangeMxcsrMode(MXCSRMode::Fpu);
     Xmm src1 = GetInputRegOrConstant(e, i.src1, e.xmm3);
-    // Note: AVX512's vrcp14sd has precision issues
-    // For now, always use division which gives exact results
+    // AVX512's vrcp14ss has precision issues, division gives exact results
     e.vmovapd(e.xmm0, e.GetXmmConstPtr(XMMOnePD));
     e.vdivsd(i.dest, e.xmm0, src1);
   }
@@ -2201,7 +2233,7 @@ struct RECIP_V128 : Sequence<RECIP_V128, I<OPCODE_RECIP, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.ChangeMxcsrMode(MXCSRMode::Vmx);
     Xmm src1 = GetInputRegOrConstant(e, i.src1, e.xmm3);
-    // Note: AVX512's vrcp14ps has precision issues so best to avoid
+    // AVX512's vrcp14ps has precision issues, devision gives exact results
     e.vmovaps(e.xmm0, e.GetXmmConstPtr(XMMOne));
     e.vdivps(i.dest, e.xmm0, src1);
   }
@@ -3312,9 +3344,8 @@ bool SelectSequence(X64Emitter* e, const Instr* i, const Instr** new_tail) {
   } else {
     const InstrKey key(i);
 
-    auto& table = SequenceTable();
-    auto it = table.find(key);
-    if (it != table.end()) {
+    auto it = sequence_table.find(key);
+    if (it != sequence_table.end()) {
       if (it->second(*e, i, InstrKey(i))) {
         *new_tail = i->next;
         return true;
