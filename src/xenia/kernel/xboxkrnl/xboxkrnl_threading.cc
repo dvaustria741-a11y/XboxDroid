@@ -12,9 +12,11 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/platform.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xsemaphore.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
@@ -486,8 +488,12 @@ DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
 
 dword_result_t NtYieldExecution_entry() {
-  xe::threading::MaybeYield();
-  return 0;
+  if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
+    kernel_state()->guest_scheduler()->YieldCurrentThread();
+  } else {
+    xe::threading::MaybeYield();
+  }
+  return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT2(NtYieldExecution, kThreading, kImplemented,
                          kHighFrequency);
@@ -816,6 +822,7 @@ dword_result_t NtReleaseSemaphore_entry(dword_t sem_handle,
     bool success =
         sem->ReleaseSemaphore((int32_t)release_count, &previous_count);
     if (!success) {
+      // Releasing would exceed the semaphore's maximum count
       XELOGW(
           "NtReleaseSemaphore: release_count={} would exceed maximum (current "
           "count={})",
@@ -885,7 +892,7 @@ dword_result_t NtReleaseMutant_entry(dword_t mutant_handle,
   auto mutant =
       kernel_state()->object_table()->LookupObject<XMutant>(mutant_handle);
   if (mutant) {
-    mutant->ReleaseMutant(priority_increment, abandon, wait);
+    result = mutant->ReleaseMutant(priority_increment, abandon, wait);
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
@@ -1366,8 +1373,11 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
     return X_STATUS_UNSUCCESSFUL;
   }
   // no-op, just meant to awaken a sleeping alertable thread to process real
-  // apcs
-  thread->thread()->QueueUserCallback([]() {});
+  // apcs. A fiber-backed thread has no host thread; cooperative alertable
+  // wake-on-APC is handled by the scheduler in a later stage.
+  if (thread->thread()) {
+    thread->thread()->QueueUserCallback([]() {});
+  }
   return X_STATUS_SUCCESS;
 }
 dword_result_t NtQueueApcThread_entry(dword_t thread_handle,
