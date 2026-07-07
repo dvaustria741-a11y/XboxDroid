@@ -11,19 +11,6 @@
 #define XENIA_APU_APU_FLAGS_H_
 
 #include "xenia/base/cvar.h"
-DECLARE_uint32(volume)
-
-    namespace xe {
-  namespace apu {
-
-  // Wraps OVERRIDE_PERSIST_uint32(volume, ...) so callers in other TUs can
-  // write the config-value layer that SaveConfig() serializes.
-  void SetVolumePersistent(uint32_t percent);
-
-  // Applies volume for the session only (no config write); used for mute.
-  void SetVolume(uint32_t percent);
-
-  }  // namespace apu
-}  // namespace xe
+DECLARE_bool(mute)
 
 #endif  // XENIA_APU_APU_FLAGS_H_

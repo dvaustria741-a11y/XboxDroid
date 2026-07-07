@@ -20,6 +20,9 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
+static constexpr std::string_view kXamModuleLoaderDataFileName =
+    "launch_data.bin";
+
 class XamModule : public KernelModule {
  public:
   XamModule(Emulator* emulator, KernelState* kernel_state);
@@ -28,7 +31,6 @@ class XamModule : public KernelModule {
   static void RegisterExportTable(xe::cpu::ExportResolver* export_resolver);
 
   struct LoaderData {
-    bool launch_data_present = false;
     std::string host_path;  // Full host path to next title to load
     std::string
         launch_path;  // Full guest path to next xex. might be default.xex
@@ -36,6 +38,9 @@ class XamModule : public KernelModule {
     uint32_t launch_flags = 0;
     std::vector<uint8_t> launch_data;
   };
+
+  void LoadLoaderData();
+  void SaveLoaderData();
 
   const LoaderData& loader_data() const { return loader_data_; }
   LoaderData& loader_data() { return loader_data_; }

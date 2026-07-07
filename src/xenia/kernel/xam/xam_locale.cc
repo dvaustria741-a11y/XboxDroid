@@ -14,7 +14,6 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/util/xfiletime.h"
 #include "xenia/kernel/xam/xam_private.h"
-#include "xenia/kernel/xconfig.h"
 #include "xenia/kernel/xenumerator.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
@@ -650,9 +649,10 @@ dword_result_t XamGetLanguageTypeface_entry(dword_t language,
 DECLARE_XAM_EXPORT1(XamGetLanguageTypeface, kNone, kImplemented);
 
 pointer_result_t XamGetLanguageTypefacePatch_entry(dword_t language) {
-  return 0;
+  assert_false(language >= static_cast<uint32_t>(XLanguage::kMaxLanguages));
+  return kernel_state()->xam_state()->GetLanguageTypefacePatch(language);
 }
-DECLARE_XAM_EXPORT1(XamGetLanguageTypefacePatch, kNone, kStub);
+DECLARE_XAM_EXPORT1(XamGetLanguageTypefacePatch, kNone, kSketchy);
 
 dword_result_t XamGetCountry_entry() {
   return kernel_state()->xconfig()->ReadSetting<uint32_t>(

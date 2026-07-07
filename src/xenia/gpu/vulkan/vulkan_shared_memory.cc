@@ -57,13 +57,6 @@ bool VulkanSharedMemory::Initialize() {
       VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
       VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
 
-  // When a dedicated transfer queue is used for resolve readback, the buffer is
-  // read from both the graphics/compute and transfer families, so it must be
-  // shared concurrently between them (no compression penalty for a buffer).
-  const uint32_t transfer_family = vulkan_device->queue_family_transfer();
-  const uint32_t concurrent_queue_families[2] = {
-      vulkan_device->queue_family_graphics_compute(), transfer_family};
-
   // Try to create a sparse buffer.
   VkBufferCreateInfo buffer_create_info;
   buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -73,15 +66,9 @@ bool VulkanSharedMemory::Initialize() {
   buffer_create_info.usage =
       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-  if (transfer_family != UINT32_MAX) {
-    buffer_create_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
-    buffer_create_info.queueFamilyIndexCount = 2;
-    buffer_create_info.pQueueFamilyIndices = concurrent_queue_families;
-  } else {
-    buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    buffer_create_info.queueFamilyIndexCount = 0;
-    buffer_create_info.pQueueFamilyIndices = nullptr;
-  }
+  buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  buffer_create_info.queueFamilyIndexCount = 0;
+  buffer_create_info.pQueueFamilyIndices = nullptr;
   if (cvars::vulkan_sparse_shared_memory &&
       vulkan_device->properties().sparseResidencyBuffer) {
     if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer_) ==
@@ -298,11 +285,6 @@ bool VulkanSharedMemory::InitializeTraceSubmitDownloads() {
   DeferredCommandBuffer& command_buffer =
       command_processor_.deferred_command_buffer();
 
-  command_processor_.InsertDebugMarker(
-      "Trace Download: %u KB, %zu ranges",
-      download_page_count << page_size_log2() >> 10,
-      trace_download_ranges().size());
-
   size_t download_range_count = trace_download_ranges().size();
   VkBufferCopy* download_regions = command_buffer.CmdCopyBufferEmplace(
       buffer_, trace_download_buffer_, uint32_t(download_range_count));
@@ -413,19 +395,7 @@ bool VulkanSharedMemory::UploadRanges(
       std::make_pair(range_front.first << page_size_log2(),
                      (range_back.first + range_back.second - range_front.first)
                          << page_size_log2()));
-  // Submit barriers (may end render pass) before pushing debug marker so
-  // EndRenderPass is not inside the SharedMem Upload marker.
   command_processor_.SubmitBarriers(true);
-
-  // Calculate total upload size for debug marker.
-  uint32_t total_upload_bytes =
-      (range_back.first + range_back.second - range_front.first)
-      << page_size_log2();
-  command_processor_.PushDebugMarker(
-      "UploadRanges (SharedMem): 0x%08X-0x%08X (%u KB, %u ranges)",
-      range_front.first << page_size_log2(),
-      (range_back.first + range_back.second) << page_size_log2(),
-      total_upload_bytes / 1024, num_upload_ranges);
   DeferredCommandBuffer& command_buffer =
       command_processor_.deferred_command_buffer();
   uint64_t submission_current = command_processor_.GetCurrentSubmission();
@@ -519,7 +489,6 @@ bool VulkanSharedMemory::UploadRanges(
                                    upload_regions_.data());
     upload_regions_.clear();
   }
-  command_processor_.PopDebugMarker();
   return successful;
 }
 

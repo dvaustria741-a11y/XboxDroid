@@ -149,6 +149,13 @@ class Window {
     kVisible,
     // Temporarily revealed, hidden if not interacting with the mouse.
     kAutoHidden,
+    kHidden,
+  };
+
+  enum class WindowResizeAction {
+    kManual,
+    kAutoMaximize,
+    kAutoMinimize,
   };
 
   static std::unique_ptr<Window> Create(WindowedAppContext& app_context,
@@ -261,10 +268,6 @@ class Window {
   // user resizes a non-maximized window.
   uint32_t GetDesiredLogicalWidth() const { return desired_logical_width_; }
   uint32_t GetDesiredLogicalHeight() const { return desired_logical_height_; }
-  void SetDesiredLogicalSize(uint32_t width, uint32_t height) {
-    desired_logical_width_ = width;
-    desired_logical_height_ = height;
-  }
 
   // 0 width or height may be returned even in case of an open window with a
   // valid non-zero-area surface depending on the platform.
@@ -575,6 +578,7 @@ class Window {
   // explicitly.
   bool OnActualSizeUpdate(uint32_t new_physical_width,
                           uint32_t new_physical_height,
+                          WindowResizeAction cause_action,
                           WindowDestructionReceiver& destruction_receiver);
   void OnDesiredFullscreenUpdate(bool new_fullscreen) {
     fullscreen_ = new_fullscreen;
@@ -599,8 +603,6 @@ class Window {
                    WindowDestructionReceiver& destruction_receiver);
   void OnMouseUp(MouseEvent& e,
                  WindowDestructionReceiver& destruction_receiver);
-  void OnMouseDoubleClick(MouseEvent& e,
-                          WindowDestructionReceiver& destruction_receiver);
   void OnMouseWheel(MouseEvent& e,
                     WindowDestructionReceiver& destruction_receiver);
 
