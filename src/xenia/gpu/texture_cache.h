@@ -124,10 +124,6 @@ class TextureCache {
   }
 
   virtual void RequestTextures(uint32_t used_texture_mask);
-  // Returns whether RequestTextures(used_texture_mask) may need to process
-  // bindings or reload texture data from guest memory. Used as a cheap
-  // pre-check to skip the full RequestTextures call when nothing changed.
-  bool AnyUsedTextureRequestWorkPending(uint32_t used_texture_mask) const;
 
   // "ActiveTexture" means as of the latest RequestTextures call.
 
@@ -225,20 +221,6 @@ class TextureCache {
     uint32_t GetHeight() const { return height_minus_1 + 1; }
     uint32_t GetDepthOrArraySize() const {
       return depth_or_array_size_minus_1 + 1;
-    }
-
-    // Returns true if this is a wide 1D texture (> 8192 wide) mapped to 2D.
-    // For wide 1D textures, height_minus_1 stores the number of rows - 1.
-    bool IsWide1D() const {
-      return dimension == xenos::DataDimension::k1D && height_minus_1 > 0;
-    }
-
-    // For wide 1D textures, returns total 1D width; otherwise GetWidth().
-    uint32_t Get1DWidth() const {
-      if (IsWide1D()) {
-        return GetWidth() * GetHeight();
-      }
-      return GetWidth();
     }
 
     texture_util::TextureGuestLayout GetGuestLayout() const {
@@ -629,8 +611,6 @@ class TextureCache {
   // this will cause another attempt to create a texture or to untile it if
   // there was an error.
   void ResetTextureBindings(bool from_destructor = false);
-  bool IsBindingOutdatedForUse(const TextureBinding& binding) const;
-  void InvalidateUsedOutdatedBindings(uint32_t used_texture_mask);
 
   const TextureBinding* GetValidTextureBinding(
       uint32_t fetch_constant_index) const {
@@ -649,21 +629,9 @@ class TextureCache {
                             void* context, void* data, uint64_t argument,
                             bool invalidated_by_gpu);
 
- protected:
   // Checks if there are any pages that contain scaled resolve data within the
   // range.
   bool IsRangeScaledResolved(uint32_t start_unscaled, uint32_t length_unscaled);
-
-  // Whether a scaled resolve texture's mips must be host-generated (the guest
-  // did not resolve them into scaled memory itself).
-  bool ScaledResolveMipsNeedGeneration(const Texture& texture) {
-    const TextureKey& key = texture.key();
-    return key.scaled_resolve && key.mip_max_level != 0 &&
-           !IsRangeScaledResolved(key.mip_page << 12,
-                                  texture.GetGuestMipsSize());
-  }
-
- private:
   // Global shared memory invalidation callback for invalidating scaled resolved
   // texture data.
   static void ScaledResolveGlobalWatchCallbackThunk(

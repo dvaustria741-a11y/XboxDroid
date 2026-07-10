@@ -54,7 +54,7 @@ class D3D12ZPDQueryPool {
                          bool initialize_rov_counter);
   void Shutdown();
 
-  bool is_initialized() const {
+  bool rtv_initialized() const {
     return query_heap_ && readback_buffer_ && readback_mapping_ != nullptr &&
            capacity_ != 0;
   }
@@ -66,7 +66,7 @@ class D3D12ZPDQueryPool {
            !rov_counter_resolve_batch_indices_.empty();
   }
 
-  bool rov_counter_initialized() const {
+  bool rov_initialized() const {
     return rov_counter_buffer_ && rov_counter_readback_buffer_ &&
            rov_counter_readback_mapping_ != nullptr && capacity_ != 0;
   }
@@ -87,22 +87,15 @@ class D3D12ZPDQueryPool {
                 uint32_t query_index) const;
   void QueueQueryResolve(uint32_t query_index, bool uses_rov_counter);
   void ClearROVCounter(DeferredCommandList& deferred_command_list,
-                       uint64_t submission, uint32_t query_index);
+                       uint32_t query_index) const;
 
   void FlushResolveBatch(DeferredCommandList& deferred_command_list,
-                         uint64_t submission, bool submission_open);
+                         bool submission_open);
 
   uint64_t GetQueryReadbackValue(uint32_t query_index,
                                  bool uses_rov_counter) const;
 
  private:
-  // Transitions rov_counter_buffer_ to new_state through the tracked state,
-  // starting from COMMON on the first use in each submission (buffers decay to
-  // COMMON when the previous submission's command list finishes).
-  void TransitionROVCounterBuffer(DeferredCommandList& deferred_command_list,
-                                  uint64_t submission,
-                                  D3D12_RESOURCE_STATES new_state);
-
   Microsoft::WRL::ComPtr<ID3D12QueryHeap> query_heap_;
 
   // Persistently mapped. Results readable once the fence signals.
@@ -112,12 +105,6 @@ class D3D12ZPDQueryPool {
   Microsoft::WRL::ComPtr<ID3D12Resource> rov_counter_buffer_;
   Microsoft::WRL::ComPtr<ID3D12Resource> rov_counter_readback_buffer_;
   uint32_t* rov_counter_readback_mapping_ = nullptr;
-  // rov_counter_buffer_ is written as a copy (WriteBufferImmediate needs
-  // COPY_DEST), through pixel shader UAV atomics (UNORDERED_ACCESS), and read
-  // out for resolve (COPY_SOURCE). The tracked state is only valid within the
-  // submission recorded in rov_counter_buffer_state_submission_.
-  D3D12_RESOURCE_STATES rov_counter_buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
-  uint64_t rov_counter_buffer_state_submission_ = UINT64_MAX;
 
   uint32_t capacity_ = 0;
   std::vector<uint32_t> free_indices_;

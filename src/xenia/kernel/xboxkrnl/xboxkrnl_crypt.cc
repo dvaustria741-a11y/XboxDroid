@@ -8,7 +8,6 @@
 */
 
 #include <algorithm>
-#include <tuple>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"

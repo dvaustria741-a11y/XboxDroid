@@ -30,9 +30,6 @@ class DebugListener {
   // end.
   virtual void OnDetached() = 0;
 
-  // Handles exception info (will be followed by OnExecutionPaused)
-  virtual void OnUnhandledException(Exception* ex) = 0;
-
   // Handles execution being interrupted and transitioning to
   // ExceutionState::kPaused.
   virtual void OnExecutionPaused() = 0;
@@ -52,9 +49,6 @@ class DebugListener {
   // Breakpoints may be hit during stepping.
   virtual void OnBreakpointHit(Breakpoint* breakpoint,
                                ThreadDebugInfo* thread_info) = 0;
-
-  // Handles any debug messages from the guest
-  virtual void OnDebugPrint(const std::string_view message) = 0;
 };
 
 }  // namespace cpu

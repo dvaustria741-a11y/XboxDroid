@@ -354,7 +354,6 @@ namespace spv {
 // Backward compatibility for ImageOperands
 #define ImageOperandsGradMask ImageOperandsMask::Grad
 #define ImageOperandsLodMask ImageOperandsMask::Lod
-#define ImageOperandsBiasMask ImageOperandsMask::Bias
 #define ImageOperandsMaskNone ImageOperandsMask::MaskNone
 
 // Backward compatibility for StorageClass
@@ -386,7 +385,6 @@ namespace spv {
 #define CapabilityDemoteToHelperInvocationEXT \
   Capability::DemoteToHelperInvocationEXT
 #define CapabilityStencilExportEXT Capability::StencilExportEXT
-#define CapabilityFragmentBarycentricKHR Capability::FragmentBarycentricKHR
 
 // Backward compatibility for AddressingModel
 #define AddressingModelLogical AddressingModel::Logical
@@ -430,20 +428,16 @@ namespace spv {
 #define ExecutionModeVertexOrderCw ExecutionMode::VertexOrderCw
 #define ExecutionModeVertexOrderCcw ExecutionMode::VertexOrderCcw
 #define ExecutionModeDepthReplacing ExecutionMode::DepthReplacing
-#define ExecutionModeDepthGreater ExecutionMode::DepthGreater
-#define ExecutionModeDepthLess ExecutionMode::DepthLess
 #define ExecutionModeStencilRefReplacingEXT \
   ExecutionMode::StencilRefReplacingEXT
 #define ExecutionModeLocalSize ExecutionMode::LocalSize
 
 // Backward compatibility for Decoration
-#define DecorationPerVertexKHR Decoration::PerVertexKHR
 #define DecorationRestrict Decoration::Restrict
 #define DecorationNonWritable Decoration::NonWritable
 #define DecorationBufferBlock Decoration::BufferBlock
 #define DecorationCoherent Decoration::Coherent
 #define DecorationCentroid Decoration::Centroid
-#define DecorationSample Decoration::Sample
 #define DecorationSpecId Decoration::SpecId
 #define DecorationNonReadable Decoration::NonReadable
 
@@ -470,9 +464,5 @@ namespace spv {
 
 // Backward compatibility for Scope
 #define ScopeDevice Scope::Device
-
-// Fragment barycentric BuiltIn values
-#define BuiltInBaryCoordKHR BuiltIn::BaryCoordKHR
-#define BuiltInBaryCoordNoPerspKHR BuiltIn::BaryCoordNoPerspKHR
 
 }  // namespace spv
