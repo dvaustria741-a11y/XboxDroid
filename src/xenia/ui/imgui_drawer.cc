@@ -13,7 +13,6 @@
 #include <cstring>
 #include <ranges>
 
-#include "embedded_font.h"
 #include "third_party/imgui/imgui.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -36,14 +35,15 @@
 #include <fontconfig/fontconfig.h>
 #endif
 
-DEFINE_path(custom_font_path, "",
-            "Path to custom font file (overrides the embedded UI font). "
-            "Empty uses the bundled Inter font.",
-            "UI");
-UPDATE_from_path(custom_font_path, 2026, 5, 1, 0,
-                 "assets/font/Inter-VariableFont_opsz,wght.ttf");
+#ifdef XE_PLATFORM_LINUX
+#include <gtk/gtk.h>
+#endif
 
-DEFINE_uint32(font_size, 13, "Allows user to set custom font size.", "UI");
+DEFINE_path(
+    custom_font_path, "",
+    "Allows user to load custom font and use it instead of default one.", "UI");
+
+DEFINE_uint32(font_size, 14, "Allows user to set custom font size.", "UI");
 UPDATE_from_uint32(font_size, 2024, 8, 31, 20, 12);
 
 namespace xe {
@@ -130,10 +130,6 @@ void ImGuiDrawer::AddNotification(ImGuiNotification* dialog) {
     }
   }
   notifications_.push_back(dialog);
-  // Request a paint to start the draw cycle for the new notification
-  if (presenter_) {
-    presenter_->RequestUIPaintFromUIThread();
-  }
 }
 
 void ImGuiDrawer::RemoveNotification(ImGuiNotification* dialog) {
@@ -146,6 +142,18 @@ void ImGuiDrawer::RemoveNotification(ImGuiNotification* dialog) {
   DetachIfLastWindowRemoved();
 }
 
+#ifdef XE_PLATFORM_LINUX
+static void SetClipboardText(void* user_data, const char* text) {
+  GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  gtk_clipboard_set_text(clipboard, text, -1);
+}
+
+static const char* GetClipboardText(void* user_data) {
+  GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  return gtk_clipboard_wait_for_text(clipboard);
+}
+#endif
+
 void ImGuiDrawer::Initialize() {
   // Setup ImGui internal state.
   // This will give us state we can swap to the ImGui globals when in use.
@@ -153,7 +161,6 @@ void ImGuiDrawer::Initialize() {
   ImGui::SetCurrentContext(internal_state_);
 
   auto& io = ImGui::GetIO();
-  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
@@ -162,6 +169,11 @@ void ImGuiDrawer::Initialize() {
 
   InitializeFonts(font_size);
   InitializeFonts(title_font_size);
+
+#ifdef XE_PLATFORM_LINUX
+  io.SetClipboardTextFn = SetClipboardText;
+  io.GetClipboardTextFn = GetClipboardText;
+#endif
 
   auto& style = ImGui::GetStyle();
   style.ScrollbarRounding = 6.0f;
@@ -235,12 +247,6 @@ void ImGuiDrawer::LoadInputSystem(hid::InputSystem* input_system) {
 
 void ImGuiDrawer::SetGuideButtonAction(std::function<void(uint8_t)> func) {
   onGuidePressFunction_ = func;
-}
-
-void ImGuiDrawer::PostDeferredCallback(std::function<void()> callback) {
-  if (window_) {
-    window_->app_context().CallInUIThreadDeferred(std::move(callback));
-  }
 }
 
 std::optional<ImGuiKey> ImGuiDrawer::VirtualKeyToImGuiKey(VirtualKey vkey) {
@@ -352,33 +358,22 @@ static constexpr ImWchar font_glyph_ranges[] = {
 
 bool ImGuiDrawer::LoadCustomFont(ImGuiIO& io, ImFontConfig& font_config,
                                  float font_size) {
-  ImFont* font = nullptr;
-  if (!cvars::custom_font_path.empty()) {
-    std::filesystem::path font_path = cvars::custom_font_path;
-    if (font_path.is_relative()) {
-      font_path = xe::filesystem::GetExecutableFolder() / font_path;
-    }
-    if (std::filesystem::exists(font_path)) {
-      font = io.Fonts->AddFontFromFileTTF(xe::path_to_utf8(font_path).c_str(),
-                                          font_size, &font_config,
-                                          font_glyph_ranges);
-    }
-  }
-  if (!font) {
-    // Embedded buffer is const and outlives the atlas; let ImGui read it
-    // in place rather than copy + own.
-    font_config.FontDataOwnedByAtlas = false;
-    font = io.Fonts->AddFontFromMemoryTTF(
-        const_cast<unsigned char*>(
-            xe::ui::embedded_font::Inter_VariableFont_opsz_wght_ttf_data),
-        static_cast<int>(
-            xe::ui::embedded_font::Inter_VariableFont_opsz_wght_ttf_size),
-        font_size, &font_config, font_glyph_ranges);
+  if (cvars::custom_font_path.empty()) {
+    return false;
   }
 
+  if (!std::filesystem::exists(cvars::custom_font_path)) {
+    return false;
+  }
+
+  const std::string font_path = xe::path_to_utf8(cvars::custom_font_path);
+  ImFont* font = io.Fonts->AddFontFromFileTTF(font_path.c_str(), font_size,
+                                              &font_config, font_glyph_ranges);
+
   io.Fonts->Build();
-  if (!font || !font->IsLoaded()) {
-    XELOGE("Failed to load UI font");
+
+  if (!font->IsLoaded()) {
+    XELOGE("Failed to load custom font: {}", font_path);
     io.Fonts->Clear();
     return false;
   }
@@ -415,57 +410,6 @@ bool ImGuiDrawer::LoadWindowsFont(ImGuiIO& io, ImFontConfig& font_config,
   CoTaskMemFree(static_cast<void*>(fonts_dir));
   return true;
 #endif
-
-#if XE_PLATFORM_LINUX
-  // On Linux, use fontconfig to find the system's default sans-serif font
-  FcConfig* config = FcInitLoadConfigAndFonts();
-  if (!config) {
-    XELOGW("Unable to initialize fontconfig for system font");
-    return false;
-  }
-
-  // Request the default sans-serif font
-  FcPattern* pattern = FcPatternCreate();
-  FcPatternAddString(pattern, FC_FAMILY, (const FcChar8*)"sans-serif");
-
-  FcConfigSubstitute(config, pattern, FcMatchPattern);
-  FcDefaultSubstitute(pattern);
-
-  FcResult result;
-  FcPattern* font = FcFontMatch(config, pattern, &result);
-
-  bool success = false;
-  if (font) {
-    FcChar8* file = nullptr;
-    if (FcPatternGetString(font, FC_FILE, 0, &file) == FcResultMatch) {
-      const char* font_path = reinterpret_cast<const char*>(file);
-
-      if (std::filesystem::exists(font_path)) {
-        ImFont* loaded_font = io.Fonts->AddFontFromFileTTF(
-            font_path, font_size, &font_config, font_glyph_ranges);
-
-        io.Fonts->Build();
-
-        if (loaded_font && loaded_font->IsLoaded()) {
-          success = true;
-        } else {
-          XELOGE("Failed to load system font: {}", font_path);
-          io.Fonts->Clear();
-        }
-      }
-    }
-    FcPatternDestroy(font);
-  }
-
-  FcPatternDestroy(pattern);
-  FcConfigDestroy(config);
-
-  if (!success) {
-    XELOGW("Unable to find system sans-serif font via fontconfig");
-  }
-  return success;
-#endif
-
   return false;
 }
 
@@ -676,34 +620,6 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   io.DisplaySize.x = window_->GetActualPhysicalWidth() * physical_to_logical;
   io.DisplaySize.y = window_->GetActualPhysicalHeight() * physical_to_logical;
 
-  // Scale based on display resolution (baseline: 1280x720) and font_size cvar
-  constexpr float kBaseWidth = 1280.f;
-  constexpr float kBaseHeight = 720.f;
-  constexpr float kBaseFontSize = 14.f;
-  float resolution_scale =
-      std::fminf(io.DisplaySize.x / kBaseWidth, io.DisplaySize.y / kBaseHeight);
-  float font_size_scale =
-      std::max(static_cast<float>(cvars::font_size), 8.f) / kBaseFontSize;
-  float combined_scale = resolution_scale * font_size_scale;
-
-  // Apply font scaling
-  io.FontGlobalScale = combined_scale;
-
-  // Apply style scaling (padding, spacing, etc.)
-  // Cache base style on first frame, then only recalculate scaled style when
-  // scale changes to avoid expensive ScaleAllSizes call every frame
-  auto& style = ImGui::GetStyle();
-  if (!base_style_initialized_) {
-    base_style_ = style;
-    base_style_initialized_ = true;
-    last_combined_scale_ = 0.f;  // Force initial scaling
-  }
-  if (last_combined_scale_ != combined_scale) {
-    last_combined_scale_ = combined_scale;
-    style = base_style_;
-    style.ScaleAllSizes(combined_scale);
-  }
-
   if (!dialogs_.empty()) {
     UpdateGamepads();
   }
@@ -756,25 +672,8 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   // it now if needed.
   DetachIfLastWindowRemoved();
 
-  // Request continuous repaints only when necessary:
-  // - Dialogs always need continuous repaints for input handling
-  // - Notifications only need continuous repaints while animating
-  // (FazeIn/FazeOut) During static display (Present stage), game frames will
-  // trigger repaints via RefreshGuestOutput ->
-  // RequestPaintOrConnectionRecoveryViaWindow
-  bool needs_continuous_repaint = !dialogs_.empty();
-  if (!needs_continuous_repaint) {
-    for (const auto* notification : notifications_) {
-      if (notification->IsAnimating()) {
-        needs_continuous_repaint = true;
-        break;
-      }
-    }
-  }
-  // The guest already drives one repaint per frame while it produces them, so
-  // only self-drive when it isn't, to avoid presenting faster than the guest.
-  if (needs_continuous_repaint &&
-      !presenter_->GuestOutputDroveCurrentUIPaint()) {
+  if (!dialogs_.empty() || !notifications_.empty()) {
+    // Repaint (and handle input) continuously if still active.
     presenter_->RequestUIPaintFromUIThread();
   }
 }
@@ -864,13 +763,11 @@ void ImGuiDrawer::OnMouseDown(MouseEvent& e) {
     }
   }
   if (button >= 0 && button < std::size(io.MouseDown)) {
-    const uint32_t mask = uint32_t(1) << button;
-    if (!(mouse_buttons_held_ & mask)) {
-      if (mouse_buttons_held_ == 0) {
+    if (!io.MouseDown[button]) {
+      if (!ImGui::IsAnyMouseDown()) {
         window_->CaptureMouse();
       }
-      mouse_buttons_held_ |= mask;
-      io.AddMouseButtonEvent(button, true);
+      io.MouseDown[button] = true;
     }
   }
 }
@@ -898,11 +795,9 @@ void ImGuiDrawer::OnMouseUp(MouseEvent& e) {
     }
   }
   if (button >= 0 && button < std::size(io.MouseDown)) {
-    const uint32_t mask = uint32_t(1) << button;
-    if (mouse_buttons_held_ & mask) {
-      mouse_buttons_held_ &= ~mask;
-      io.AddMouseButtonEvent(button, false);
-      if (mouse_buttons_held_ == 0) {
+    if (io.MouseDown[button]) {
+      io.MouseDown[button] = false;
+      if (!ImGui::IsAnyMouseDown()) {
         window_->ReleaseMouse();
       }
     }
@@ -912,8 +807,7 @@ void ImGuiDrawer::OnMouseUp(MouseEvent& e) {
 void ImGuiDrawer::OnMouseWheel(MouseEvent& e) {
   SwitchToPhysicalMouseAndUpdateMousePosition(e);
   auto& io = GetIO();
-  io.AddMouseWheelEvent(
-      0.0f, float(e.scroll_y()) / float(MouseEvent::kScrollPerDetent));
+  io.MouseWheel += float(e.scroll_y()) / float(MouseEvent::kScrollPerDetent);
 }
 
 void ImGuiDrawer::OnTouchEvent(TouchEvent& e) {
@@ -991,7 +885,8 @@ void ImGuiDrawer::UpdateMousePosition(float x, float y) {
   auto& io = GetIO();
   float physical_to_logical =
       float(window_->GetMediumDpi()) / float(window_->GetDpi());
-  io.AddMousePosEvent(x * physical_to_logical, y * physical_to_logical);
+  io.MousePos.x = x * physical_to_logical;
+  io.MousePos.y = y * physical_to_logical;
 }
 
 void ImGuiDrawer::SwitchToPhysicalMouseAndUpdateMousePosition(
@@ -1061,8 +956,7 @@ void ImGuiDrawer::UpdateGamepads() {
   uint8_t controller_to_poke = XUserIndexNone;
   hid::X_INPUT_STATE gamepad_state;
   for (uint8_t i = 0; i < XUserMaxUserCount; i++) {
-    // Use GetStateForUI so ImGui navigation works even when input is blocked
-    if (input_system_->GetStateForUI(i, 1, &gamepad_state) == X_ERROR_SUCCESS) {
+    if (input_system_->GetState(i, 1, &gamepad_state) == X_ERROR_SUCCESS) {
       if (gamepad_state.gamepad.buttons != 0) {
         controller_to_poke = i;
         break;

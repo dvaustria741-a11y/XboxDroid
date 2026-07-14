@@ -278,9 +278,7 @@ Function* Processor::ResolveFunction(uint32_t address) {
     if (xexmod) {
       auto addr_flags = xexmod->GetInstructionAddressFlags(address);
       if (addr_flags) {
-        InfoCacheFlags bits{};
-        bits.was_resolved = 1;
-        AtomicSetInfoCacheFlags(addr_flags, bits);
+        addr_flags->was_resolved = 1;
       }
     }
 
@@ -650,8 +648,7 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
       if ((scan_breakpoint->address_type() == Breakpoint::AddressType::kGuest &&
            scan_breakpoint->guest_address() == frame.guest_pc) ||
           (scan_breakpoint->address_type() == Breakpoint::AddressType::kHost &&
-           scan_breakpoint->host_address() == frame.host_pc) ||
-          scan_breakpoint->ContainsHostAddress(frame.host_pc)) {
+           scan_breakpoint->host_address() == frame.host_pc)) {
         breakpoint = scan_breakpoint;
         break;
       }
@@ -676,14 +673,15 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
     debug_listener_->OnExecutionPaused();
   }
 
+  ResumeAllThreads();
   thread_info->thread->thread()->Suspend();
 
   // Apply thread context changes.
   // TODO(benvanik): apply to all threads?
 #if XE_ARCH_AMD64
-  ex->set_resume_pc(thread_info->host_context.rip);
+  ex->set_resume_pc(thread_info->host_context.rip + 2);
 #elif XE_ARCH_ARM64
-  ex->set_resume_pc(thread_info->host_context.pc);
+  ex->set_resume_pc(thread_info->host_context.pc + 2);
 #else
 #error Instruction pointer not specified for the target CPU architecture.
 #endif  // XE_ARCH
@@ -695,10 +693,6 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
 void Processor::OnStepCompleted(ThreadDebugInfo* thread_info) {
   auto global_lock = global_critical_region_.Acquire();
   execution_state_ = ExecutionState::kPaused;
-
-  // Unlock before notifying to avoid deadlock with debugger stub.
-  global_lock.unlock();
-
   if (debug_listener_) {
     debug_listener_->OnExecutionPaused();
   }
@@ -710,12 +704,6 @@ bool Processor::OnUnhandledException(Exception* ex) {
   // If we have no listener return right away.
   // TODO(benvanik): DemandDebugListener()?
   if (!debug_listener_) {
-    return false;
-  }
-
-  // Only pause on exceptions when debugging is explicitly enabled.
-  // Without --debug flag, let the exception propagate normally.
-  if (!cvars::debug) {
     return false;
   }
 
@@ -733,19 +721,15 @@ bool Processor::OnUnhandledException(Exception* ex) {
                               ex->thread_context());
 
   // Stop and notify the listener.
-  if (execution_state_ != ExecutionState::kRunning) {
-    global_lock.unlock();
-    Thread::GetCurrentThread()->thread()->Suspend();
-    return true;
-  }
+  // This will take control.
+  assert_true(execution_state_ == ExecutionState::kRunning);
   execution_state_ = ExecutionState::kPaused;
 
-  // Notify debugger that execution stopped.
-  debug_listener_->OnUnhandledException(ex);
+  // Notify debugger that exceution stopped.
+  // debug_listener_->OnException(info);
   debug_listener_->OnExecutionPaused();
 
-  // Unlock before suspending to avoid deadlock with debugger stub.
-  global_lock.unlock();
+  // Suspend self.
   Thread::GetCurrentThread()->thread()->Suspend();
 
   return true;
@@ -956,10 +940,7 @@ void Processor::StepHostInstruction(uint32_t thread_id) {
                        thread_info->step_breakpoint.reset();
                        OnStepCompleted(thread_info);
                      }));
-
-  // Add to front of breakpoints map, so this should get evaluated first
-  breakpoints_.insert(breakpoints_.begin(), thread_info->step_breakpoint.get());
-
+  AddBreakpoint(thread_info->step_breakpoint.get());
   thread_info->step_breakpoint->Resume();
 
   // ResumeAllBreakpoints();
@@ -992,10 +973,7 @@ void Processor::StepGuestInstruction(uint32_t thread_id) {
                        thread_info->step_breakpoint.reset();
                        OnStepCompleted(thread_info);
                      }));
-
-  // Add to front of breakpoints map, so this should get evaluated first
-  breakpoints_.insert(breakpoints_.begin(), thread_info->step_breakpoint.get());
-
+  AddBreakpoint(thread_info->step_breakpoint.get());
   thread_info->step_breakpoint->Resume();
 
   // ResumeAllBreakpoints();

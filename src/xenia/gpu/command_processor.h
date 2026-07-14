@@ -12,7 +12,6 @@
 
 #include <atomic>
 #include <cstring>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -26,7 +25,6 @@
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"
-#include "xenia/gpu/xenos_zpd_report.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/memory.h"
 #include "xenia/ui/presenter.h"
@@ -37,14 +35,11 @@ class ByteStream;
 
 namespace gpu {
 
-enum class GPUSetting {
-  ClearMemoryPageState,
-};
+enum class GPUSetting { ClearMemoryPageState, ReadbackMemexport };
 
 enum class ReadbackResolveMode {
   kDisabled,  // No readback (none)
-  kSome,      // Delayed sync, skip copy on cache hit (some)
-  kFast,      // Delayed sync, copy every frame (fast)
+  kFast,      // Delayed sync, 1 frame behind (fast)
   kFull       // Immediate sync with GPU stall (full)
 };
 
@@ -53,11 +48,15 @@ enum class ZPDMode {
   kFake,     // Fake sample counts, no real GPU queries (fake)
   kFast,     // Real queries with speculative cached writes (fast)
   kFastAlt,  // Fast queries, but preserves cached zeroes (fast-alt)
-  kStrict,   // Real queries, waits before writeback. May hang. (strict)
+  kStrict,   // Real queries, waits before writeback (strict)
 };
 
 void SaveGPUSetting(GPUSetting setting, uint64_t value);
 bool GetGPUSetting(GPUSetting setting);
+ReadbackResolveMode GetReadbackResolveMode();
+void SetReadbackResolveMode(const std::string& mode);
+ZPDMode GetZPDMode();
+void SetZPDMode(const std::string& mode);
 
 // Shared pool capacity for D3D12 and Vulkan.
 constexpr uint32_t kZPDQueryPoolCapacity = 8192;
@@ -71,13 +70,13 @@ struct ResolveRange {
 // Backstop for strict mode. Abandon any pending retires after this many polls
 // so EVENT_WRITE_ZPD doesn't keep spinning on an unresolved report.
 constexpr uint32_t kStrictZPDRetireMaxStalls = 16;
-// Millisecond deadline for strict ZPD retire.
+// Clock backstop used for strict retire if guest polling is sparse.
 constexpr uint64_t kStrictZPDRetireDeadlineMs = 2;
 
 // Cap for the fast-mode cached delta map.  Games reuse a small set of report
 // addresses so this should never be hit, but prevents unbounded growth if a
 // title cycles through unique addresses.  Clearing the cache has no
-// correctness impact — it only removes speculative writeback hints.
+// correctness impact - it only removes speculative writeback hints.
 constexpr size_t kFastZPDCacheMaxEntries = 1024;
 
 class GraphicsSystem;
@@ -111,18 +110,11 @@ enum class GammaRampType {
 };
 
 class CommandProcessor {
- public:
-  using ReportHandle = uint32_t;
-  static constexpr ReportHandle kInvalidReportHandle = 0;
-
  protected:
   RingBuffer
       reader_;  // chrispy: instead of having ringbuffer on stack, have it near
                 // the start of the class so we can access it via rel8. This
                 // also reduces the number of params we need to pass
-  // Converts the reader's host pointer (+ offset) to a guest physical address.
-  uint32_t GuestReadPtrOffset(int32_t offset = 0) const;
-
  public:
   enum class SwapPostEffect {
     kNone,
@@ -138,33 +130,13 @@ class CommandProcessor {
 
   Shader* active_vertex_shader() const { return active_vertex_shader_; }
   Shader* active_pixel_shader() const { return active_pixel_shader_; }
-  uint32_t active_vertex_shader_ucode_address() const {
-    return active_vertex_shader_ucode_address_;
-  }
 
   virtual bool Initialize();
   virtual void Shutdown();
 
-  virtual std::string GetTitleStateSuffix() const { return {}; }
-
   void CallInThread(std::function<void()> fn);
 
   virtual void ClearCaches();
-  virtual void InvalidateGpuMemory();
-  virtual void ClearReadbackBuffers();
-
-  // Get cached readback resolve mode (avoids string parsing every frame)
-  ReadbackResolveMode GetReadbackResolveMode() const {
-    return cached_readback_resolve_mode_;
-  }
-
-  // Set readback resolve mode (updates both cvar and cached value)
-  void SetReadbackResolveMode(ReadbackResolveMode mode);
-
-  // Get cached ZPD mode (avoids string parsing every frame).
-  ZPDMode GetZPDMode() const { return cached_zpd_mode_; }
-  // Set ZPD mode (updates both cvar and cached value).
-  void SetZPDMode(ZPDMode mode);
 
   // "Desired" is for the external thread managing the post-processing effect.
   SwapPostEffect GetDesiredSwapPostEffect() const {
@@ -178,11 +150,6 @@ class CommandProcessor {
   // for instance).
   virtual void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                          uint32_t frontbuffer_height) {}
-
-  // Throttle presentation based on framerate_limit cvar.
-  // Called after IssueSwap to limit host frame rate without affecting guest
-  // vblank timing.
-  void ThrottlePresentation();
 
   // May be called not only from the command processor thread when the command
   // processor is paused, and the termination of this function may be explicitly
@@ -234,7 +201,7 @@ class CommandProcessor {
   static constexpr uint32_t kReadbackBufferSizeIncrement = 16 * 1024 * 1024;
 
   // Eviction policy constants for readback buffer cache
-  static constexpr size_t kMaxReadbackBuffers = 256;
+  static constexpr size_t kMaxReadbackBuffers = 64;
   static constexpr uint64_t kReadbackBufferEvictionAgeFrames = 60;
 
   // Progressive alignment for readback buffers to avoid wasting memory
@@ -330,7 +297,10 @@ class CommandProcessor {
 
   virtual void OnPrimaryBufferEnd() {}
 
-  // TODO(boma): Add tracking for VIZ & EXT queries.
+  // TODO(boma): Add tracking for EVENT_WRITE_EXT reports.
+  using ReportHandle = uint64_t;
+  static constexpr ReportHandle kInvalidReportHandle = 0;
+
   enum class QueryOpenResult {
     kOpened,
     kDeferred,
@@ -357,12 +327,16 @@ class CommandProcessor {
     // Last known delta. Carried forward on forced close so slot doesn't
     // briefly look fully occluded. 0 is a valid delta for alternate fast path.
     uint32_t cached_delta = 0;
-    // Distinguishes "we resolved to zero" from "we have no cached value yet".
     bool has_cached_delta = false;
     bool ended = false;
   };
 
-  // TODO(boma): Replace with a map keyed by slot_base for concurrent slots.
+  // Currently open guest lifetime. Retired reports are tracked separately
+  // by handle until their query segments resolve. This intentionally models
+  // only one logical report at a time. That's enough for conventional ZPD
+  // reports, but QueryBatch can have multiple slots in flight, so it doesn't
+  // fit this layout. Eventually this probably wants to become something more
+  // like a map of active reports keyed by slot and sequence instead.
   struct ActiveZPDSegment {
     ReportHandle report_handle = kInvalidReportHandle;
     uint32_t slot_base = 0;
@@ -377,24 +351,6 @@ class CommandProcessor {
     ReportHandle report_handle = kInvalidReportHandle;
     uint32_t cached_delta = 0;
     bool has_cached_delta = false;
-  };
-
-  // Logged by the backend every 100 frames if ZPD logging cvar is true.
-  struct ZPDStats {
-    uint64_t logical_begun = 0;
-    uint64_t logical_ended = 0;
-    uint64_t segments_begun = 0;
-    uint64_t segments_ended = 0;
-    uint64_t pool_exhausted = 0;
-    uint64_t failed = 0;
-    uint64_t counter_wraps = 0;
-    uint64_t same_slot_reuse = 0;
-    uint64_t last_log_frame = 0;
-
-    void Reset(uint64_t current_frame) {
-      *this = {};
-      last_log_frame = current_frame;
-    }
   };
 
   virtual void EnsureZPDQueryResources() {}
@@ -477,6 +433,7 @@ class CommandProcessor {
 #include "pm4_command_processor_declare.h"
 
   virtual Shader* LoadShader(xenos::ShaderType shader_type,
+                             uint32_t guest_address,
                              const uint32_t* host_address,
                              uint32_t dword_count) {
     return nullptr;
@@ -488,12 +445,6 @@ class CommandProcessor {
     return false;
   }
   virtual bool IssueCopy() { return false; }
-
-  // Debug marker stubs for base class (overridden by D3D12/Vulkan backends).
-  bool debug_markers_enabled() const { return false; }
-  void PushDebugMarker(const char* format, ...) {}
-  void PopDebugMarker() {}
-  void InsertDebugMarker(const char* format, ...) {}
 
   // "Actual" is for the command processor thread, to be read by the
   // implementations.
@@ -519,10 +470,6 @@ class CommandProcessor {
   std::unordered_map<uint32_t, uint32_t> fast_zpd_report_cached_values_;
 
   uint32_t querybatch_zpd_sample_count_ = UINT32_MAX;
-
-  // Sticky after host pool init failure. Forces EVENT_WRITE_ZPD onto the fake
-  // path so guests don't stall waiting on a pending sentinel that will never
-  // be written. Cleared by ResetZPDState.
   bool zpd_force_fake_fallback_ = false;
 
   // Strict mode defers guest completion until the queued END has retired.
@@ -543,7 +490,6 @@ class CommandProcessor {
   }
 
   uint32_t fake_zpd_sample_count_ = 0;
-  ZPDStats zpd_stats_;
 
   TraceWriter trace_writer_;
   enum class TraceState {
@@ -580,10 +526,6 @@ class CommandProcessor {
 
   Shader* active_vertex_shader_ = nullptr;
   Shader* active_pixel_shader_ = nullptr;
-  // Guest physical address the active vertex shader's ucode was loaded from,
-  // for reading it back from shared memory (the ucode interpreter placeholder).
-  // 0 if unknown (loaded immediately, embedded in the command buffer).
-  uint32_t active_vertex_shader_ucode_address_ = 0;
 
   bool paused_ = false;
 
@@ -591,16 +533,6 @@ class CommandProcessor {
   // "Desired" is for the external thread managing the post-processing effect.
   SwapPostEffect swap_post_effect_desired_ = SwapPostEffect::kNone;
   SwapPostEffect swap_post_effect_actual_ = SwapPostEffect::kNone;
-
-  // Cached readback resolve mode (parsed once from string cvar)
-  ReadbackResolveMode cached_readback_resolve_mode_ =
-      ReadbackResolveMode::kFast;
-
-  // Cached ZPD occlusion query mode (defaults to fake)
-  ZPDMode cached_zpd_mode_ = ZPDMode::kFake;
-
-  // For host frame rate limiting at IssueSwap
-  uint64_t last_swap_time_ = 0;
 
  private:
   reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};

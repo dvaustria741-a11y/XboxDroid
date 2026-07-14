@@ -10,7 +10,6 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/xam/user_profile.h"
 
-#include <algorithm>
 #include "third_party/fmt/include/fmt/format.h"
 #include "third_party/stb/stb_image.h"
 #include "xenia/kernel/kernel_state.h"
@@ -20,7 +19,8 @@
 #include "xenia/kernel/xam/user_settings.h"
 #include "xenia/kernel/xam/user_tracker.h"
 #include "xenia/kernel/xam/xdbf/gpd_info.h"
-#include "xenia/kernel/xconfig.h"
+
+DECLARE_int32(user_language);
 
 namespace xe {
 namespace kernel {
@@ -331,13 +331,6 @@ void UserTracker::UpdateSpaInfo(SpaInfo* spa_info) {
     return;
   }
 
-  // First, ensure the title is added to all tracked users' played lists
-  // This creates the necessary GPD entries before we try to update them
-  for (const uint64_t xuid : tracked_xuids_) {
-    AddTitleToPlayedList(xuid);
-  }
-
-  // Now update existing GPD files with latest SPA data
   UpdateProfileGpd();
   UpdateTitleGpdFile();
   UpdateMissingAchievemntsIcons();
@@ -771,10 +764,10 @@ bool UserTracker::UpdateUserIcon(uint64_t xuid,
   XTileType icon_type = XTileType::kGameIcon;
 
   if (std::pair<uint16_t, uint16_t>(width, height) == kProfileIconSize) {
-    icon_type = XTileType::kPersonalGamerTile;
+    icon_type = XTileType::kGamerTile;
   } else if (std::pair<uint16_t, uint16_t>(width, height) ==
              kProfileIconSizeSmall) {
-    icon_type = XTileType::kPersonalGamerTileSmall;
+    icon_type = XTileType::kGamerTileSmall;
   } else {
     return false;
   }

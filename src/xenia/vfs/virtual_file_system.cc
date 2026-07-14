@@ -53,16 +53,6 @@ bool VirtualFileSystem::UnregisterDevice(const std::string_view path) {
   return false;
 }
 
-Device* VirtualFileSystem::GetDevice(const std::string_view path) {
-  auto global_lock = global_critical_region_.Acquire();
-  for (auto it = devices_.begin(); it != devices_.end(); ++it) {
-    if ((*it)->mount_path() == path) {
-      return (*it).get();
-    }
-  }
-  return nullptr;
-}
-
 bool VirtualFileSystem::RegisterSymbolicLink(const std::string_view path,
                                              const std::string_view target) {
   auto global_lock = global_critical_region_.Acquire();
@@ -148,17 +138,12 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
     normalized_path = resolved_path;
   }
 
-  // Find the device with the longest matching mount path. Devices nest, e.g.
-  // \Device\Harddisk0\Partition1\Content lives inside \Device\Harddisk0, so the
-  // most specific mount must win regardless of registration order.
-  Device* device = nullptr;
-  for (const auto& d : devices_) {
-    if (xe::utf8::starts_with_case(normalized_path, d->mount_path()) &&
-        (!device || d->mount_path().size() > device->mount_path().size())) {
-      device = d.get();
-    }
-  }
-  if (!device) {
+  // Find the device.
+  auto it =
+      std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
+        return xe::utf8::starts_with(normalized_path, d->mount_path());
+      });
+  if (it == devices_.cend()) {
     // Supress logging the error for ShaderDumpxe:\CompareBackEnds as this is
     // not an actual problem nor something we care about.
     if (path != "ShaderDumpxe:\\CompareBackEnds") {
@@ -167,6 +152,7 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
     return nullptr;
   }
 
+  const auto& device = *it;
   auto relative_path = normalized_path.substr(device->mount_path().size());
   return device->ResolvePath(relative_path);
 }
@@ -306,7 +292,8 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
     // return X_STATUS_ACCESS_DENIED;
     // TODO(benvanik): figure out why games are opening read-only files with
     // write modes.
-    XELOGW("Attempted to open read-only file/dir for write: {}", path);
+    assert_always();
+    XELOGW("Attempted to open the file/dir for create/write");
     desired_access = FileAccess::kGenericRead | FileAccess::kFileReadData;
   }
 
@@ -365,7 +352,7 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
 
 X_STATUS VirtualFileSystem::ExtractContentFile(Entry* entry,
                                                std::filesystem::path base_path,
-                                               std::atomic<uint64_t>& progress,
+                                               uint64_t& progress,
                                                bool extract_to_root) {
   // Allocate a buffer when needed.
   size_t buffer_size = 0;
@@ -441,20 +428,15 @@ X_STATUS VirtualFileSystem::ExtractContentFile(Entry* entry,
   return 0;
 }
 
-X_STATUS VirtualFileSystem::ExtractContentFiles(
-    Device* device, std::filesystem::path base_path,
-    std::atomic<uint64_t>& progress, std::function<bool()> should_cancel) {
+X_STATUS VirtualFileSystem::ExtractContentFiles(Device* device,
+                                                std::filesystem::path base_path,
+                                                uint64_t& progress) {
   // Run through all the files, breadth-first style.
   std::queue<vfs::Entry*> queue;
   auto root = device->ResolvePath("/");
   queue.push(root);
 
   while (!queue.empty()) {
-    // Check for cancellation before processing each file
-    if (should_cancel && should_cancel()) {
-      return X_ERROR_CANCELLED;
-    }
-
     auto entry = queue.front();
     queue.pop();
     for (auto& entry : entry->children()) {
