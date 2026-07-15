@@ -11,7 +11,6 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
-#include <cstdint>
 #include <cstring>
 
 #include "xenia/base/assert.h"
@@ -19,16 +18,8 @@
 #include "xenia/base/string.h"
 #include "xenia/base/system.h"
 
-// Forward-declared instead of pulling in <SDL3/SDL.h> — xenia-base must not
-// drag SDL onto its include path, and only the dlsym() cast needs the type.
-// Flags and signature are stable across SDL2/3.
-namespace {
-using SDL_ShowSimpleMessageBox_fn = int (*)(uint32_t flags, const char* title,
-                                            const char* message, void* window);
-constexpr uint32_t kSDL_MessageBoxError = 0x00000010;
-constexpr uint32_t kSDL_MessageBoxWarning = 0x00000020;
-constexpr uint32_t kSDL_MessageBoxInformation = 0x00000040;
-}  // namespace
+// Use headers in third party to not depend on system sdl headers for building
+#include "third_party/SDL2/include/SDL.h"
 
 namespace xe {
 
@@ -39,25 +30,21 @@ void LaunchWebBrowser(const std::string_view url) {
 }
 
 void LaunchFileExplorer(const std::filesystem::path& path) {
-  auto cmd = std::string("xdg-open \"");
-  cmd.append(path.string());
-  cmd.append("\"");
+  auto cmd = std::string("xdg-open ");
+  cmd.append(path);
   system(cmd.c_str());
 }
 
 void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
-  void* libsdl = dlopen("libSDL3.so.0", RTLD_LAZY | RTLD_LOCAL);
-  if (!libsdl) {
-    libsdl = dlopen("libSDL3.so", RTLD_LAZY | RTLD_LOCAL);
-  }
-  assert_not_null(libsdl);
-  if (libsdl) {
-    auto pSDL_ShowSimpleMessageBox =
-        reinterpret_cast<SDL_ShowSimpleMessageBox_fn>(
-            dlsym(libsdl, "SDL_ShowSimpleMessageBox"));
+  void* libsdl2 = dlopen("libSDL2.so", RTLD_LAZY | RTLD_LOCAL);
+  assert_not_null(libsdl2);
+  if (libsdl2) {
+    auto* pSDL_ShowSimpleMessageBox =
+        reinterpret_cast<decltype(SDL_ShowSimpleMessageBox)*>(
+            dlsym(libsdl2, "SDL_ShowSimpleMessageBox"));
     assert_not_null(pSDL_ShowSimpleMessageBox);
     if (pSDL_ShowSimpleMessageBox) {
-      uint32_t flags;
+      Uint32 flags;
       const char* title;
       char* message_copy = reinterpret_cast<char*>(alloca(message.size() + 1));
       std::memcpy(message_copy, message.data(), message.size());
@@ -67,20 +54,20 @@ void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
         default:
         case SimpleMessageBoxType::Help:
           title = "Xenia Help";
-          flags = kSDL_MessageBoxInformation;
+          flags = SDL_MESSAGEBOX_INFORMATION;
           break;
         case SimpleMessageBoxType::Warning:
           title = "Xenia Warning";
-          flags = kSDL_MessageBoxWarning;
+          flags = SDL_MESSAGEBOX_WARNING;
           break;
         case SimpleMessageBoxType::Error:
           title = "Xenia Error";
-          flags = kSDL_MessageBoxError;
+          flags = SDL_MESSAGEBOX_ERROR;
           break;
       }
       pSDL_ShowSimpleMessageBox(flags, title, message_copy, NULL);
     }
-    dlclose(libsdl);
+    dlclose(libsdl2);
   }
 }
 

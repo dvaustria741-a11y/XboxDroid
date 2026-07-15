@@ -12,15 +12,12 @@
 
 #include <array>
 #include <atomic>
-#include <future>
 #include <mutex>
 #include <optional>
-#include <string_view>
-#include <thread>
 
-#include <SDL3/SDL.h>
+#include "SDL.h"
+#include "third_party/rapidcsv/src/rapidcsv.h"
 #include "xenia/hid/input_driver.h"
-#include "xenia/xbox.h"
 
 #define HID_SDL_USER_COUNT 4
 #define HID_SDL_THUMB_THRES 0x4E00
@@ -40,7 +37,6 @@ class SDLInputDriver final : public InputDriver {
   X_STATUS Setup() override;
 
   void LoadGameControllerDB();
-  void LoadMappingsFromMemory(std::string_view data);
 
   X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
                            X_INPUT_CAPABILITIES* out_caps) override;
@@ -49,11 +45,10 @@ class SDLInputDriver final : public InputDriver {
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                         X_INPUT_KEYSTROKE* out_keystroke) override;
   virtual InputType GetInputType() const override;
-  std::vector<InputDeviceInfo> EnumerateDevices() override;
 
  private:
   struct ControllerState {
-    SDL_Gamepad* sdl;
+    SDL_GameController* sdl;
     X_INPUT_CAPABILITIES caps;
     X_INPUT_STATE state;
     bool state_changed;
@@ -83,17 +78,14 @@ class SDLInputDriver final : public InputDriver {
   std::optional<size_t> GetControllerIndexFromInstanceID(
       SDL_JoystickID instance_id);
   ControllerState* GetControllerState(uint32_t user_index);
+  bool TestSDLVersion() const;
   void UpdateXCapabilities(ControllerState& state);
-
-  // Owns SDL init, the event pump, and teardown so the UI thread's modal
-  // loops (wx menus/dialogs) can't stall controller hotplug.
-  void SDLEventThread(std::promise<X_STATUS> init_result);
+  void QueueControllerUpdate();
 
   bool sdl_events_initialized_;
-  bool sdl_gamepad_initialized_;
+  bool sdl_gamecontroller_initialized_;
   int sdl_events_unflushed_;
-  std::thread sdl_thread_;
-  std::atomic<bool> sdl_thread_should_exit_;
+  std::atomic<bool> sdl_pumpevents_queued_;
   std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
 };

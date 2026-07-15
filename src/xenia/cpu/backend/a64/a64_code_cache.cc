@@ -9,8 +9,6 @@
 
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 
-#include <cstdint>
-
 #include "xenia/base/platform.h"
 #if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
@@ -20,6 +18,8 @@ namespace xe {
 namespace cpu {
 namespace backend {
 namespace a64 {
+
+bool A64CodeCache::Initialize() { return CodeCacheBase::Initialize(); }
 
 void A64CodeCache::FillCode(void* write_address, size_t size) {
   // Fill with BRK #0 (0xD4200000), 4-byte aligned.
