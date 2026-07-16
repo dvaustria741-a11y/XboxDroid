@@ -18,8 +18,8 @@
 #include <vector>
 
 #include "xenia/base/assert.h"
-#include "xenia/gpu/d3d12/d3d12_shader.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
+#include "xenia/gpu/dxbc_shader.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/texture_cache.h"
 #include "xenia/gpu/texture_util.h"
@@ -59,6 +59,9 @@ class D3D12TextureCache final : public TextureCache {
       xenos::AnisoFilter aniso_filter : 3;  // 17
       uint32_t mip_min_level : 4;           // 21
       uint32_t mip_base_map : 1;            // 22
+      // Force the border color alpha to 1.0 (only meaningful with a border
+      // clamp mode).
+      uint32_t force_bc_w_to_max : 1;  // 23
       // Maximum mip level is in the texture resource itself, but mip_base_map
       // can be used to limit fetching to mip_min_level.
     };
@@ -105,24 +108,24 @@ class D3D12TextureCache final : public TextureCache {
   // (otherwise they are incompatible - like if this function returned false).
   bool AreActiveTextureSRVKeysUpToDate(
       const TextureSRVKey* keys,
-      const D3D12Shader::TextureBinding* host_shader_bindings,
+      const DxbcShader::TextureBinding* host_shader_bindings,
       size_t host_shader_binding_count) const;
   // Exports the current binding data to texture SRV keys so they can be stored
   // for checking whether subsequent draw calls can keep using the same
   // bindings. Write host_shader_binding_count keys.
   void WriteActiveTextureSRVKeys(
       TextureSRVKey* keys,
-      const D3D12Shader::TextureBinding* host_shader_bindings,
+      const DxbcShader::TextureBinding* host_shader_bindings,
       size_t host_shader_binding_count) const;
   void WriteActiveTextureBindfulSRV(
-      const D3D12Shader::TextureBinding& host_shader_binding,
+      const DxbcShader::TextureBinding& host_shader_binding,
       D3D12_CPU_DESCRIPTOR_HANDLE handle);
   uint32_t GetActiveTextureBindlessSRVIndex(
-      const D3D12Shader::TextureBinding& host_shader_binding);
+      const DxbcShader::TextureBinding& host_shader_binding);
   void PrefetchSamplerParameters(
-      const D3D12Shader::SamplerBinding& binding) const;
+      const DxbcShader::SamplerBinding& binding) const;
   SamplerParameters GetSamplerParameters(
-      const D3D12Shader::SamplerBinding& binding) const;
+      const DxbcShader::SamplerBinding& binding) const;
   void WriteSampler(SamplerParameters parameters,
                     D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
 
@@ -144,6 +147,21 @@ class D3D12TextureCache final : public TextureCache {
   void MarkCurrentScaledResolveRangeUAVWritesCommitNeeded() {
     assert_true(IsDrawResolutionScaled());
     GetCurrentScaledResolveBuffer().SetUAVBarrierPending();
+  }
+  // Accessors for scaled resolve range info (for readback resolve path).
+  uint64_t GetCurrentScaledResolveRangeStartScaled() const {
+    return scaled_resolve_current_range_start_scaled_;
+  }
+  uint64_t GetCurrentScaledResolveRangeLengthScaled() const {
+    return scaled_resolve_current_range_length_scaled_;
+  }
+  // Returns the ID3D12Resource for the current scaled resolve buffer.
+  ID3D12Resource* GetCurrentScaledResolveBufferResource() {
+    return GetCurrentScaledResolveBuffer().resource();
+  }
+  // Returns the buffer index (gigabyte offset) for the current scaled resolve.
+  size_t GetCurrentScaledResolveBufferIndexPublic() const {
+    return GetCurrentScaledResolveBufferIndex();
   }
 
   // Returns the ID3D12Resource of the front buffer texture (in
@@ -797,12 +815,23 @@ class D3D12TextureCache final : public TextureCache {
   D3D12CommandProcessor& command_processor_;
   bool bindless_resources_used_;
 
+  // Bit per guest format: whether the unsigned / signed host SRV format
+  // supports linear filtering on this device (queried in Initialize). Used to
+  // fall back to point sampling for formats the device can't filter.
+  uint64_t host_format_linear_filterable_unsigned_ = 0;
+  uint64_t host_format_linear_filterable_signed_ = 0;
+
   Microsoft::WRL::ComPtr<ID3D12RootSignature> load_root_signature_;
   std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, kLoadShaderCount>
       load_pipelines_;
   // Load pipelines for resolution-scaled resolve targets.
   std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, kLoadShaderCount>
       load_pipelines_scaled_;
+
+  // Mip generation for scaled resolve textures.
+  Microsoft::WRL::ComPtr<ID3D12RootSignature> mip_gen_root_signature_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> mip_gen_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> mip_gen_3d_pipeline_;
 
   std::vector<SRVDescriptorCachePage> srv_descriptor_cache_;
   uint32_t srv_descriptor_cache_allocated_;
