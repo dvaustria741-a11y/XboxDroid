@@ -11,7 +11,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <tuple>
 
 #include "third_party/dxbc/DXBCChecksum.h"
 #include "third_party/fmt/include/fmt/xchar.h"
@@ -38,48 +37,73 @@ DEFINE_bool(
     "Allow stencil reference output usage on Direct3D 12 on Intel GPUs - not "
     "working on UHD Graphics 630 as of March 2021 (driver 27.20.0100.8336).",
     "GPU");
+// TODO(Triang3l): Make ROV the default when it's optimized better (for
+// instance, using static shader modifications to pass render target
+// parameters).
+DEFINE_string(
+    render_target_path_d3d12, "",
+    "Render target emulation path to use on Direct3D 12.\n"
+    "Use: [any, rtv, rov]\n"
+    " rtv:\n"
+    "  Host render targets and fixed-function blending and depth / stencil "
+    "testing, copying between render targets when needed.\n"
+    "  Lower accuracy (limited pixel format support).\n"
+    "  Performance limited primarily by render target layout changes requiring "
+    "copying, but generally higher.\n"
+    " rov:\n"
+    "  Manual pixel packing, blending and depth / stencil testing, with free "
+    "render target layout changes.\n"
+    "  Requires a GPU supporting rasterizer-ordered views.\n"
+    "  Highest accuracy (all pixel formats handled in software).\n"
+    "  Performance limited primarily by overdraw.\n"
+    "  On AMD drivers, currently causes shader compiler crashes in many "
+    "cases.\n"
+    " Any other value:\n"
+    "  Choose what is considered the most optimal for the system (currently "
+    "always RTV because the ROV path is much slower now, except for Intel "
+    "GPUs, which have a bug in stencil testing that causes Xbox 360 Direct3D 9 "
+    "clears not to work).",
+    "GPU");
 
 namespace xe {
 namespace gpu {
 namespace d3d12 {
 
 // Generated with `xb buildshaders`.
-// Internal shaders always use DXBC (SM 5.1) because the transfer pixel shaders
-// are dynamically generated as DXBC and can't be mixed with DXIL vertex
-// shaders.
 namespace shaders {
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/clear_uint2_ps.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/fullscreen_cw_vs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/host_depth_store_1xmsaa_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/host_depth_store_2xmsaa_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/host_depth_store_4xmsaa_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/passthrough_position_xy_vs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_clear_32bpp_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_clear_32bpp_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_clear_64bpp_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_clear_64bpp_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_fast_32bpp_1x2xmsaa_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_fast_32bpp_1x2xmsaa_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_fast_32bpp_4xmsaa_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_fast_32bpp_4xmsaa_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_fast_64bpp_1x2xmsaa_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_fast_64bpp_1x2xmsaa_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_fast_64bpp_4xmsaa_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_fast_64bpp_4xmsaa_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_128bpp_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_128bpp_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_16bpp_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_16bpp_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_32bpp_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_32bpp_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_64bpp_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_64bpp_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_8bpp_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_8bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/clear_uint2_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/fullscreen_cw_vs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/host_depth_store_1xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/host_depth_store_2xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/host_depth_store_4xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/passthrough_position_xy_vs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_clear_32bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_clear_32bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_clear_64bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_clear_64bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_fast_32bpp_1x2xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_fast_32bpp_1x2xmsaa_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_fast_32bpp_4xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_fast_32bpp_4xmsaa_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_fast_64bpp_1x2xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_fast_64bpp_1x2xmsaa_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_fast_64bpp_4xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_fast_64bpp_4xmsaa_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_128bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_128bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_16bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_16bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_32bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_32bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_64bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_64bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_8bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_full_8bpp_scaled_cs.h"
 }  // namespace shaders
 
-static constexpr D3D12RenderTargetCache::ResolveCopyShaderCode
-    kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)] = {
+constexpr D3D12RenderTargetCache::ResolveCopyShaderCode
+    D3D12RenderTargetCache::kResolveCopyShaders[size_t(
+        draw_util::ResolveCopyShaderIndex::kCount)] = {
         {shaders::resolve_fast_32bpp_1x2xmsaa_cs,
          sizeof(shaders::resolve_fast_32bpp_1x2xmsaa_cs),
          shaders::resolve_fast_32bpp_1x2xmsaa_scaled_cs,
@@ -189,20 +213,9 @@ bool D3D12RenderTargetCache::Initialize() {
       command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
 
-  // The transfer pixel shaders are hand-built as DXBC but must share a pipeline
-  // with the DXIL passthrough vertex shader, so they need to be converted to
-  // DXIL with dxilconv. Without it host render target transfers will fail (but
-  // the pixel shader interlock path doesn't use them).
-  if (FAILED(provider.DxbcConverterCreateInstance(
-          CLSID_DxbcConverter, IID_PPV_ARGS(&dxbc_to_dxil_converter_)))) {
-    XELOGE(
-        "Failed to create the DXBC to DXIL converter for transfer pixel "
-        "shaders. Place dxilconv.dll next to the executable.");
-  }
-
-  if (cvars::render_target_path == "performance") {
+  if (cvars::render_target_path_d3d12 == "rtv") {
     path_ = Path::kHostRenderTargets;
-  } else if (cvars::render_target_path == "accuracy") {
+  } else if (cvars::render_target_path_d3d12 == "rov") {
     path_ = Path::kPixelShaderInterlock;
   } else {
     // As of April 2021 (driver version 27.20.0100.9316), on Intel (tested on
@@ -1030,15 +1043,12 @@ bool D3D12RenderTargetCache::Initialize() {
     }
 
     // Create the resolve EDRAM buffer clearing pipelines.
-    const void* resolve_clear_32bpp_cs =
-        draw_resolution_scaled
-            ? static_cast<const void*>(shaders::resolve_clear_32bpp_scaled_cs)
-            : static_cast<const void*>(shaders::resolve_clear_32bpp_cs);
-    size_t resolve_clear_32bpp_cs_size =
-        draw_resolution_scaled ? sizeof(shaders::resolve_clear_32bpp_scaled_cs)
-                               : sizeof(shaders::resolve_clear_32bpp_cs);
     resolve_rov_clear_32bpp_pipeline_ = ui::d3d12::util::CreateComputePipeline(
-        device, resolve_clear_32bpp_cs, resolve_clear_32bpp_cs_size,
+        device,
+        draw_resolution_scaled ? shaders::resolve_clear_32bpp_scaled_cs
+                               : shaders::resolve_clear_32bpp_cs,
+        draw_resolution_scaled ? sizeof(shaders::resolve_clear_32bpp_scaled_cs)
+                               : sizeof(shaders::resolve_clear_32bpp_cs),
         resolve_rov_clear_root_signature_);
     if (resolve_rov_clear_32bpp_pipeline_ == nullptr) {
       XELOGE(
@@ -1048,15 +1058,12 @@ bool D3D12RenderTargetCache::Initialize() {
       return false;
     }
     resolve_rov_clear_32bpp_pipeline_->SetName(L"Resolve Clear 32bpp");
-    const void* resolve_clear_64bpp_cs =
-        draw_resolution_scaled
-            ? static_cast<const void*>(shaders::resolve_clear_64bpp_scaled_cs)
-            : static_cast<const void*>(shaders::resolve_clear_64bpp_cs);
-    size_t resolve_clear_64bpp_cs_size =
-        draw_resolution_scaled ? sizeof(shaders::resolve_clear_64bpp_scaled_cs)
-                               : sizeof(shaders::resolve_clear_64bpp_cs);
     resolve_rov_clear_64bpp_pipeline_ = ui::d3d12::util::CreateComputePipeline(
-        device, resolve_clear_64bpp_cs, resolve_clear_64bpp_cs_size,
+        device,
+        draw_resolution_scaled ? shaders::resolve_clear_64bpp_scaled_cs
+                               : shaders::resolve_clear_64bpp_cs,
+        draw_resolution_scaled ? sizeof(shaders::resolve_clear_64bpp_scaled_cs)
+                               : sizeof(shaders::resolve_clear_64bpp_cs),
         resolve_rov_clear_root_signature_);
     if (resolve_rov_clear_64bpp_pipeline_ == nullptr) {
       XELOGE(
@@ -1078,7 +1085,6 @@ bool D3D12RenderTargetCache::Initialize() {
 }
 
 void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
-  ui::d3d12::util::ReleaseAndNull(dxbc_to_dxil_converter_);
   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_64bpp_pipeline_);
   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_32bpp_pipeline_);
   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_root_signature_);
@@ -1318,12 +1324,6 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
   // Copying.
   bool copied = false;
   if (resolve_info.copy_dest_extent_length) {
-    if (command_processor_.debug_markers_enabled()) {
-      char label[draw_util::kDebugMarkerLabelMaxLength];
-      draw_util::FormatResolveCopyDebugMarker(label, sizeof(label),
-                                              resolve_info);
-      command_processor_.PushDebugMarker("%s", label);
-    }
     if (GetPath() == Path::kHostRenderTargets) {
       // Dump the current contents of the render targets owning the affected
       // range to edram_buffer_.
@@ -1420,7 +1420,6 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
             "memory region");
       }
     }
-    command_processor_.PopDebugMarker();
   } else {
     copied = true;
   }
@@ -1430,12 +1429,6 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
   bool clear_depth = resolve_info.IsClearingDepth();
   bool clear_color = resolve_info.IsClearingColor();
   if (clear_depth || clear_color) {
-    if (command_processor_.debug_markers_enabled()) {
-      char label[draw_util::kDebugMarkerLabelMaxLength];
-      draw_util::FormatResolveClearDebugMarker(
-          label, sizeof(label), resolve_info, clear_depth, clear_color);
-      command_processor_.PushDebugMarker("%s", label);
-    }
     switch (GetPath()) {
       case Path::kHostRenderTargets: {
         Transfer::Rectangle clear_rectangle;
@@ -1518,7 +1511,6 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
       default:
         assert_unhandled_case(GetPath());
     }
-    command_processor_.PopDebugMarker();
   } else {
     cleared = true;
   }
@@ -2045,31 +2037,6 @@ void D3D12RenderTargetCache::CommitEdramBufferUAVWrites(
   edram_buffer_modification_status_ =
       EdramBufferModificationStatus::kUnmodified;
   PixelShaderInterlockFullEdramBarrierPlaced();
-}
-
-// 7e3 (HDR float) source -> 8_8_8_8 dest: decode the 7e3 floats and saturate to
-// [0, 1] (r2 scratch) instead of bit-reinterpreting. See
-// IsTransferValueConverted7e3And8888 for why and when.
-static void TransferConvert7e3To8888(dxbc::Assembler& a) {
-  for (uint32_t i = 0; i < 3; ++i) {
-    DxbcShaderTranslator::Float7e3To32(a, dxbc::Dest::R(2, 1 << i), 1, 0,
-                                       i * 10, 0, 0, 0, 1);
-  }
-  a.OpUBFE(dxbc::Dest::R(2, 0b1000), dxbc::Src::LU(2), dxbc::Src::LU(30),
-           dxbc::Src::R(1, dxbc::Src::kXXXX));
-  a.OpUToF(dxbc::Dest::R(2, 0b1000), dxbc::Src::R(2, dxbc::Src::kWWWW));
-  a.OpMul(dxbc::Dest::R(2, 0b1000), dxbc::Src::R(2, dxbc::Src::kWWWW),
-          dxbc::Src::LF(1.0f / 3.0f));
-  a.OpMov(dxbc::Dest::O(0), dxbc::Src::R(2), true);
-}
-
-// Reverse of TransferConvert7e3To8888: unpack the 8_8_8_8 bytes to [0, 1] and
-// store directly into the 7e3 host R16G16B16A16_FLOAT (r2 scratch).
-static void TransferConvert8888To7e3(dxbc::Assembler& a) {
-  a.OpUBFE(dxbc::Dest::R(2), dxbc::Src::LU(8), dxbc::Src::LU(0, 8, 16, 24),
-           dxbc::Src::R(1, dxbc::Src::kXXXX));
-  a.OpUToF(dxbc::Dest::R(2), dxbc::Src::R(2));
-  a.OpMul(dxbc::Dest::O(0), dxbc::Src::R(2), dxbc::Src::LF(1.0f / 255.0f));
 }
 
 ID3D12PipelineState* const*
@@ -3655,10 +3622,6 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
                 DxbcShaderTranslator::PreSaturatedLinearToPWLGamma(
                     a, 1, i, 1, i, 2, 0, 2, 1);
               }
-              if (osgn_parameter_index_sv_stencil_ref != UINT32_MAX) {
-                DxbcShaderTranslator::PreSaturatedLinearToPWLGamma(
-                    a, 1, 0, 1, 0, 2, 0, 2, 1);
-              }
             }
             a.OpMAd(
                 dxbc::Dest::R(
@@ -3830,20 +3793,8 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
         // 32bpp color output. Any register can be used as temporary if needed -
         // this is the end of the shader.
         if (color_packed_in_r1x) {
-          // Value-converted 7e3 source. See
-          // IsTransferValueConverted7e3And8888 and TransferConvert7e3To8888.
-          const bool source_is_7e3 =
-              key.value_convert && source_is_color &&
-              (source_color_format ==
-                   xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
-               source_color_format == xenos::ColorRenderTargetFormat::
-                                          k_2_10_10_10_FLOAT_AS_16_16_16_16);
           switch (dest_color_format) {
             case xenos::ColorRenderTargetFormat::k_8_8_8_8: {
-              if (source_is_7e3) {
-                TransferConvert7e3To8888(a);
-                break;
-              }
               a.OpUBFE(dxbc::Dest::R(1), dxbc::Src::LU(8),
                        dxbc::Src::LU(0, 8, 16, 24),
                        dxbc::Src::R(1, dxbc::Src::kXXXX));
@@ -3854,10 +3805,6 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
             case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
               // 8_8_8_8_GAMMA is represented by linear stored in
               // R16G16B16A16_UNORM.
-              if (source_is_7e3) {
-                TransferConvert7e3To8888(a);
-                break;
-              }
               a.OpUBFE(dxbc::Dest::R(1), dxbc::Src::LU(8),
                        dxbc::Src::LU(0, 8, 16, 24),
                        dxbc::Src::R(1, dxbc::Src::kXXXX));
@@ -3888,12 +3835,6 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
             case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
             case xenos::ColorRenderTargetFormat::
                 k_2_10_10_10_FLOAT_AS_16_16_16_16: {
-              if (key.value_convert && source_is_color &&
-                  source_color_format ==
-                      xenos::ColorRenderTargetFormat::k_8_8_8_8) {
-                TransferConvert8888To7e3(a);
-                break;
-              }
               // Color using r1.yz as temporary.
               for (uint32_t i = 0; i < 3; ++i) {
                 DxbcShaderTranslator::Float7e3To32(a, dxbc::Dest::O(0, 1 << i),
@@ -4415,28 +4356,10 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
   pipeline_desc.pRootSignature = transfer_root_signatures_[size_t(
       use_stencil_reference_output_ ? mode.root_signature_with_stencil_ref
                                     : mode.root_signature_no_stencil_ref)];
-  // Convert the hand-built DXBC pixel shader to DXIL so it can pair with the
-  // DXIL passthrough vertex shader in a single pipeline.
-  std::vector<uint8_t> built_shader_dxil;
-  {
-    void* dxil = nullptr;
-    UINT32 dxil_size = 0;
-    if (!dxbc_to_dxil_converter_ ||
-        FAILED(dxbc_to_dxil_converter_->Convert(
-            built_shader_.data(), built_shader_size_bytes, nullptr, &dxil,
-            &dxil_size, nullptr)) ||
-        dxil == nullptr) {
-      XELOGE("Failed to convert a transfer pixel shader from DXBC to DXIL");
-      return nullptr;
-    }
-    built_shader_dxil.assign(static_cast<const uint8_t*>(dxil),
-                             static_cast<const uint8_t*>(dxil) + dxil_size);
-    CoTaskMemFree(dxil);
-  }
   pipeline_desc.VS.pShaderBytecode = shaders::passthrough_position_xy_vs;
   pipeline_desc.VS.BytecodeLength = sizeof(shaders::passthrough_position_xy_vs);
-  pipeline_desc.PS.pShaderBytecode = built_shader_dxil.data();
-  pipeline_desc.PS.BytecodeLength = UINT(built_shader_dxil.size());
+  pipeline_desc.PS.pShaderBytecode = built_shader_.data();
+  pipeline_desc.PS.BytecodeLength = built_shader_size_bytes;
   if (key.dest_msaa_samples == xenos::MsaaSamples::k2X && !msaa_2x_supported_) {
     // Using sample 0 as 0 and 3 as 1 for 2x instead.
     pipeline_desc.SampleMask = 0b1001;
@@ -4576,23 +4499,6 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
     const Transfer::Rectangle* resolve_clear_rectangle) {
   assert_true(GetPath() == Path::kHostRenderTargets);
 
-  bool resolve_clear_needed =
-      render_target_resolve_clear_values && resolve_clear_rectangle;
-
-  // Check if there's any actual work to do before pushing debug marker.
-  bool has_transfers = false;
-  for (uint32_t i = 0; i < render_target_count && !has_transfers; ++i) {
-    if (render_targets[i] &&
-        (!render_target_transfers[i].empty() || resolve_clear_needed)) {
-      has_transfers = true;
-    }
-  }
-  if (!has_transfers) {
-    return;
-  }
-
-  command_processor_.PushDebugMarker("PerformTransfersAndResolveClears");
-
   const ui::d3d12::D3D12Provider& provider =
       command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
@@ -4600,6 +4506,8 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
   DeferredCommandList& command_list =
       command_processor_.GetDeferredCommandList();
 
+  bool resolve_clear_needed =
+      render_target_resolve_clear_values && resolve_clear_rectangle;
   D3D12_RECT clear_rect;
   if (resolve_clear_needed) {
     // Assuming the rectangle is already clamped by the setup function from the
@@ -4984,8 +4892,6 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
               source_rt_key.msaa_samples;
           new_transfer_shader_key.source_resource_format =
               source_rt_key.resource_format;
-          new_transfer_shader_key.value_convert =
-              IsTransferValueConverted7e3And8888(source_rt_key, dest_rt_key);
           bool host_depth_source_is_copy =
               host_depth_source_d3d12_rt == &dest_d3d12_rt;
           new_transfer_shader_key.host_depth_source_is_copy =
@@ -5597,8 +5503,6 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
       }
     }
   }
-
-  command_processor_.PopDebugMarker();
 }
 
 void D3D12RenderTargetCache::SetCommandListRenderTargets(
@@ -6538,9 +6442,6 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     return;
   }
 
-  command_processor_.PushDebugMarker(
-      "DumpRenderTargets (EDRAM Write): base tile %u", dump_base);
-
   // Clear previously set temporary indices.
   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
     auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
@@ -6729,8 +6630,6 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     }
     MarkEdramBufferModified();
   }
-
-  command_processor_.PopDebugMarker();
 }
 
 }  // namespace d3d12

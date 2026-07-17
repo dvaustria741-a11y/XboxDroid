@@ -18,8 +18,6 @@ namespace backend {
 
 class NullBackend : public Backend {
  public:
-  std::string name() const override { return "null"; }
-
   void CommitExecutableRange(uint32_t guest_low, uint32_t guest_high) override;
 
   std::unique_ptr<Assembler> CreateAssembler() override;

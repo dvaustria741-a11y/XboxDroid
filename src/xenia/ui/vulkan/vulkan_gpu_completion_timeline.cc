@@ -29,14 +29,7 @@ VulkanGPUCompletionTimeline::~VulkanGPUCompletionTimeline() {
             vulkan_device_->device(), 1,
             &pending_submission_fences_.back().second, VK_TRUE,
             UINT64_MAX) == VK_ERROR_DEVICE_LOST) {
-      XELOGE(
-          "VulkanGPUCompletionTimeline[{}]: DEVICE_LOST waiting on final "
-          "submission {} during destruction ({} fences pending)",
-          name_, pending_submission_fences_.back().first,
-          pending_submission_fences_.size());
-      if (vulkan_device_->SetLost()) {
-        vulkan_device_->LogFaultInfo();
-      }
+      vulkan_device_->SetLost();
     }
 
     while (!pending_submission_fences_.empty()) {
@@ -132,14 +125,7 @@ void VulkanGPUCompletionTimeline::UpdateCompletedSubmission() {
     if (fence_status != VK_SUCCESS) {
       // Not ready, or an error.
       if (fence_status == VK_ERROR_DEVICE_LOST) {
-        XELOGE(
-            "VulkanGPUCompletionTimeline[{}]: DEVICE_LOST polling fence for "
-            "submission {} ({} fences pending)",
-            name_, pending_submission_fences_.front().first,
-            pending_submission_fences_.size());
-        if (vulkan_device_->SetLost()) {
-          vulkan_device_->LogFaultInfo();
-        }
+        vulkan_device_->SetLost();
       }
       break;
     }
@@ -171,16 +157,10 @@ void VulkanGPUCompletionTimeline::AwaitSubmissionImpl(
             vulkan_device_->device(), 1,
             &std::prev(submission_end_iterator)->second, VK_TRUE, UINT64_MAX);
     if (fence_wait_result != VK_SUCCESS) {
-      XELOGE(
-          "VulkanGPUCompletionTimeline[{}]: vkWaitForFences -> {} (awaited "
-          "submission {}, last-pending {}, {} fences pending)",
-          name_, vk::to_string(vk::Result(fence_wait_result)),
-          awaited_submission, std::prev(submission_end_iterator)->first,
-          pending_submission_fences_.size());
+      XELOGE("Failed to wait for a Vulkan fence: {}",
+             vk::to_string(vk::Result(fence_wait_result)));
       if (fence_wait_result == VK_ERROR_DEVICE_LOST) {
-        if (vulkan_device_->SetLost()) {
-          vulkan_device_->LogFaultInfo();
-        }
+        vulkan_device_->SetLost();
       }
       return;
     }

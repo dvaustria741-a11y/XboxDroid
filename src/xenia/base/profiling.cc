@@ -15,12 +15,9 @@
 
 // NOTE: microprofile must be setup first, before profiling.h is included.
 #define MICROPROFILE_ENABLED 1
-#define MICROPROFILE_IMPL 1
-// UI impl needs MicroProfileDraw{Box,Text,Line2D} from microprofile_drawer.cc.
-#if defined(XE_OPTION_PROFILING_UI) && XE_OPTION_PROFILING_UI
 #define MICROPROFILEUI_ENABLED 1
+#define MICROPROFILE_IMPL 1
 #define MICROPROFILEUI_IMPL 1
-#endif
 #define MICROPROFILE_PER_THREAD_BUFFER_SIZE (1024 * 1024 * 10)
 #define MICROPROFILE_USE_THREAD_NAME_CALLBACK 1
 #define MICROPROFILE_WEBSERVER_MAXFRAMES 3
@@ -42,12 +39,6 @@
 #include "xenia/ui/window.h"
 
 #if XE_OPTION_PROFILING
-#include <cstdio>
-#include <mutex>
-#include <unordered_map>
-#endif
-
-#if XE_OPTION_PROFILING
 #include "third_party/microprofile/microprofileui.h"
 #endif  // XE_OPTION_PROFILING
 
@@ -63,36 +54,6 @@ namespace xe {
 
 #if XE_OPTION_PROFILING
 
-MicroProfileToken GetGuestFunctionToken(uint32_t guest_address) {
-  // Thread-local cache keeps the hot path lock-free. This is called per guest
-  // function under FTrace, so the global lock is hit only on the first lookup
-  // of an address on each thread.
-  thread_local std::unordered_map<uint32_t, MicroProfileToken> local;
-  auto local_it = local.find(guest_address);
-  if (local_it != local.end()) {
-    return local_it->second;
-  }
-
-  static std::mutex mutex;
-  static std::unordered_map<uint32_t, MicroProfileToken> tokens;
-  MicroProfileToken token;
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    auto it = tokens.find(guest_address);
-    if (it != tokens.end()) {
-      token = it->second;
-    } else {
-      char name[16];
-      std::snprintf(name, sizeof(name), "%08X", guest_address);
-      token = MicroProfileGetToken("guestfn", name, Profiler::GetColor(name),
-                                   MicroProfileTokenTypeCpu);
-      tokens.emplace(guest_address, token);
-    }
-  }
-  local.emplace(guest_address, token);
-  return token;
-}
-
 Profiler::ProfilerWindowInputListener Profiler::input_listener_;
 size_t Profiler::z_order_ = 0;
 ui::Window* Profiler::window_ = nullptr;
@@ -105,13 +66,7 @@ bool Profiler::dpi_scaling_ = false;
 
 bool Profiler::is_enabled() { return true; }
 
-bool Profiler::is_visible() {
-#if XE_OPTION_PROFILING_UI
-  return is_enabled() && MicroProfileIsDrawing();
-#else
-  return false;
-#endif
-}
+bool Profiler::is_visible() { return is_enabled() && MicroProfileIsDrawing(); }
 
 void Profiler::Initialize() {
   // Custom groups.
@@ -148,18 +103,11 @@ void Profiler::Dump() {
 #if XE_OPTION_PROFILING_UI
   MicroProfileDumpTimers();
 #endif  // XE_OPTION_PROFILING_UI
-  if (FILE* f = fopen("profile.html", "w")) {
-    MicroProfileDumpHtml(
-        MicroProfileWriteFile, f,
-        MICROPROFILE_MAX_FRAME_HISTORY - MICROPROFILE_GPU_FRAME_DELAY - 3,
-        nullptr);
-    fclose(f);
-    XELOGI("Profiler dump written to profile.html");
-  }
+  // MicroProfileDumpHtml("profile.html");
+  // MicroProfileDumpHtmlToFile();
 }
 
 void Profiler::Shutdown() {
-  Dump();
   SetUserIO(0, nullptr, nullptr, nullptr);
   window_ = nullptr;
   MicroProfileShutdown();
@@ -258,7 +206,6 @@ void Profiler::TogglePause() {}
 #endif  // XE_OPTION_PROFILING_UI
 
 void Profiler::ToggleDisplay() {
-#if XE_OPTION_PROFILING_UI
   bool was_visible = is_visible();
   MicroProfileToggleDisplayMode();
   if (is_visible() != was_visible) {
@@ -269,6 +216,7 @@ void Profiler::ToggleDisplay() {
         window_->AddInputListener(&input_listener_, z_order_);
       }
     }
+#if XE_OPTION_PROFILING_UI
     if (presenter_) {
       if (was_visible) {
         presenter_->RemoveUIDrawerFromUIThread(&ui_drawer_);
@@ -276,8 +224,8 @@ void Profiler::ToggleDisplay() {
         presenter_->AddUIDrawerFromUIThread(&ui_drawer_, z_order_);
       }
     }
-  }
 #endif  // XE_OPTION_PROFILING_UI
+  }
 }
 
 void Profiler::SetUserIO(size_t z_order, ui::Window* window,
