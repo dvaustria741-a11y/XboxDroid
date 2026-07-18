@@ -38,6 +38,13 @@
 // and let the normal AudioSystem handling take it, to prevent duplicate
 // implementations. They can be found in xboxkrnl_audio_xma.cc
 
+DEFINE_uint32(apu_max_queued_frames, 8,
+              "Allows changing max buffered audio frames to reduce audio "
+              "delay. Lowering this value might cause performance issues. "
+              "Value range: [4-64]",
+              "APU");
+UPDATE_from_uint32(apu_max_queued_frames, 2024, 8, 31, 20, 64);
+
 namespace xe {
 namespace apu {
 
@@ -45,11 +52,12 @@ AudioSystem::AudioSystem(cpu::Processor* processor)
     : memory_(processor->memory()),
       processor_(processor),
       worker_running_(false) {
-  std::memset(clients_, 0, sizeof(clients_));
+  queued_frames_ = std::clamp(cvars::apu_max_queued_frames,
+                              static_cast<uint32_t>(kMinimumQueuedFrames),
+                              static_cast<uint32_t>(kMaximumQueuedFrames));
 
   for (size_t i = 0; i < kMaximumClientCount; ++i) {
-    client_semaphores_[i] =
-        xe::threading::Semaphore::Create(0, kMaximumQueuedFrames);
+    client_semaphores_[i] = xe::threading::Semaphore::Create(0, queued_frames_);
   }
   pending_work_event_ = xe::threading::Event::CreateAutoResetEvent(false);
   assert_not_null(pending_work_event_);
@@ -109,8 +117,6 @@ void AudioSystem::WorkerThreadMain() {
 
     size_t client_index = kMaximumClientCount;
     uint64_t earliest_pump_us = std::numeric_limits<uint64_t>::max();
-    uint32_t client_callback = 0;
-    uint32_t client_callback_arg = 0;
     {
       auto global_lock = global_critical_region_.Acquire();
 
@@ -124,9 +130,6 @@ void AudioSystem::WorkerThreadMain() {
       }
 
       if (client_index != kMaximumClientCount) {
-        client_callback = clients_[client_index].callback;
-        client_callback_arg = clients_[client_index].wrapped_callback_arg;
-
         const double scalar = xe::Clock::guest_time_scalar();
         const uint64_t min_us =
             scalar > 0.0 ? static_cast<uint64_t>(kAudioPumpInterval / scalar)
@@ -171,11 +174,28 @@ void AudioSystem::WorkerThreadMain() {
       }
     }
 
-    // Submit only if the host has a free output slot;
-    if (client_callback &&
-        xe::threading::Wait(client_semaphores_[client_index].get(), false,
-                            std::chrono::milliseconds(0)) ==
-            xe::threading::WaitResult::kSuccess) {
+    // Submit only if the host has a free output slot; otherwise drop (the host
+    // queue is full, so it is already well buffered).
+    if (xe::threading::Wait(client_semaphores_[client_index].get(), false,
+                            std::chrono::milliseconds(0)) !=
+        xe::threading::WaitResult::kSuccess) {
+      continue;
+    }
+
+    // UnregisterClient waits on this after clearing in_use.
+    std::lock_guard<std::mutex> cb_lk(clients_[client_index].callback_mutex);
+
+    uint32_t client_callback = 0;
+    uint32_t client_callback_arg = 0;
+    {
+      auto global_lock = global_critical_region_.Acquire();
+      if (clients_[client_index].in_use) {
+        client_callback = clients_[client_index].callback;
+        client_callback_arg = clients_[client_index].wrapped_callback_arg;
+      }
+    }
+
+    if (client_callback) {
       SCOPE_profile_cpu_i("apu", "xe::apu::AudioSystem->client_callback");
       uint64_t args[] = {client_callback_arg};
       processor_->Execute(worker_thread_->thread_state(), client_callback, args,
@@ -236,7 +256,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   assert_true(index >= 0);
 
   auto client_semaphore = client_semaphores_[index].get();
-  auto ret = client_semaphore->Release(kMaximumQueuedFrames, nullptr);
+  auto ret = client_semaphore->Release(queued_frames_, nullptr);
   assert_true(ret);
 
   AudioDriver* driver;
@@ -254,12 +274,15 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   uint32_t ptr = memory()->SystemHeapAlloc(0x4);
   xe::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
 
-  clients_[index] = {};
   clients_[index].driver = driver;
   clients_[index].callback = callback;
   clients_[index].callback_arg = callback_arg;
   clients_[index].wrapped_callback_arg = ptr;
   clients_[index].in_use = true;
+  clients_[index].next_pump_us = 0;
+  clients_[index].frames_submitted.store(0);
+  clients_[index].frames_processed.store(0);
+  clients_[index].frames_dropped.store(0);
 
   // Wake the worker so it re-scans and starts pacing this client immediately.
   pending_work_event_->Set();
@@ -292,21 +315,65 @@ void AudioSystem::SubmitFrame(size_t index, float* samples) {
     // callback will never fire, causing the semaphore to leak.
     if (index < kMaximumClientCount && clients_[index].driver) {
       static float silence[apu::AudioDriver::kFrameSamplesMax] = {0};
+      clients_[index].frames_dropped++;
       (clients_[index].driver)->SubmitFrame(silence);
+    } else if (index < kMaximumClientCount) {
+      // Tick the semaphore so the worker doesn't stall on a dead client.
+      client_semaphores_[index]->Release(1, nullptr);
     }
     return;
   }
+  clients_[index].frames_submitted++;
+  clients_[index].frames_processed++;
   (clients_[index].driver)->SubmitFrame(samples);
+}
+
+bool AudioSystem::GetClientPerformance(size_t index,
+                                       ClientPerformance* out_perf) {
+  if (index >= kMaximumClientCount || !out_perf) {
+    return false;
+  }
+
+  if (!clients_[index].in_use) {
+    return false;
+  }
+
+  out_perf->frames_submitted = clients_[index].frames_submitted.load();
+  out_perf->frames_processed = clients_[index].frames_processed.load();
+  out_perf->frames_dropped = clients_[index].frames_dropped.load();
+  return true;
 }
 
 void AudioSystem::UnregisterClient(size_t index) {
   SCOPE_profile_cpu_f("apu");
 
-  auto global_lock = global_critical_region_.Acquire();
   assert_true(index < kMaximumClientCount);
-  DestroyDriver(clients_[index].driver);
-  memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
-  clients_[index] = {0};
+  AudioDriver* driver_to_destroy;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    XELOGI(
+        "AudioSystem::UnregisterClient: index={}, driver={:p}", index,
+        index < kMaximumClientCount ? (void*)clients_[index].driver : nullptr);
+    driver_to_destroy = clients_[index].driver;
+    // Leak wrapped_callback_arg: in-flight callback may hold this pointer.
+    clients_[index].driver = nullptr;
+    clients_[index].callback = 0;
+    clients_[index].callback_arg = 0;
+    clients_[index].wrapped_callback_arg = 0;
+    clients_[index].in_use = false;
+    clients_[index].next_pump_us = 0;
+    clients_[index].frames_submitted.store(0);
+    clients_[index].frames_processed.store(0);
+    clients_[index].frames_dropped.store(0);
+  }
+
+  // Wait for any in-flight callback; can't hold global lock (callback
+  // re-enters).
+  {
+    std::lock_guard<std::mutex> lk(clients_[index].callback_mutex);
+  }
+
+  DestroyDriver(driver_to_destroy);
 
   // Drain the semaphore of its count.
   auto client_semaphore = client_semaphores_[index].get();
@@ -372,7 +439,7 @@ bool AudioSystem::Restore(ByteStream* stream) {
     client.in_use = true;
 
     auto client_semaphore = client_semaphores_[id].get();
-    auto ret = client_semaphore->Release(kMaximumQueuedFrames, nullptr);
+    auto ret = client_semaphore->Release(queued_frames_, nullptr);
     assert_true(ret);
 
     AudioDriver* driver = nullptr;
@@ -398,6 +465,7 @@ void AudioSystem::Pause() {
   }
   paused_ = true;
 
+  // Kind of a hack, but it works.
   pending_work_event_->Set();
   pause_fence_.Wait();
 
