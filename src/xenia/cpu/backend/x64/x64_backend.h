@@ -57,20 +57,15 @@ static constexpr uint32_t GUEST_TRAMPOLINE_MIN_LEN = 8;
 static constexpr uint32_t MAX_GUEST_TRAMPOLINES =
     (GUEST_TRAMPOLINE_END - GUEST_TRAMPOLINE_BASE) / GUEST_TRAMPOLINE_MIN_LEN;
 
+#define RESERVE_BLOCK_SHIFT 16
+
+#define RESERVE_NUM_ENTRIES \
+  ((1024ULL * 1024ULL * 1024ULL * 4ULL) >> RESERVE_BLOCK_SHIFT)
 // https://codalogic.com/blog/2022/12/06/Exploring-PowerPCs-read-modify-write-operations
-// The Xenon reservation granule is one 128 byte cache line.
-static constexpr uint32_t RESERVE_GRANULE_SHIFT = 7;
-// One generation counter per granule, hashed into a fixed size table. A
-// successful stwcx. bumps its granule, which kills every other thread's
-// reservation on it. Two granules colliding in the table only costs a spurious
-// stwcx. failure, which the architecture permits.
-static constexpr uint32_t RESERVE_NUM_ENTRIES = 1u << 20;
-static constexpr uint32_t RESERVE_ENTRY_MASK = RESERVE_NUM_ENTRIES - 1;
-
 struct ReserveHelper {
-  uint32_t generations[RESERVE_NUM_ENTRIES];
+  uint64_t blocks[RESERVE_NUM_ENTRIES / 64];
 
-  ReserveHelper() { memset(generations, 0, sizeof(generations)); }
+  ReserveHelper() { memset(blocks, 0, sizeof(blocks)); }
 };
 
 struct X64BackendStackpoint {
@@ -105,10 +100,8 @@ struct X64BackendContext {
   uint64_t* guest_tick_count;
   // records mapping of host_stack to guest_stack
   X64BackendStackpoint* stackpoints;
-  // guest address the live reservation was taken on, and the granule
-  // generation as it read at that point
-  uint32_t reserve_address;
-  uint32_t reserve_generation;
+  uint64_t cached_reserve_offset;
+  uint32_t cached_reserve_bit;
   unsigned int current_stackpoint_depth;
   unsigned int mxcsr_fpu;  // currently, the way we implement rounding mode
                            // affects both vmx and the fpu
@@ -134,8 +127,6 @@ class X64Backend : public Backend {
 
   X64CodeCache* code_cache() const { return code_cache_.get(); }
   uintptr_t emitter_data() const { return emitter_data_; }
-
-  std::string name() const override { return "x64"; }
 
   // Call a generated function, saving all stack parameters.
   HostToGuestThunk host_to_guest_thunk() const { return host_to_guest_thunk_; }
@@ -188,17 +179,6 @@ class X64Backend : public Backend {
   virtual void FreeGuestTrampoline(uint32_t trampoline_addr) override;
   virtual void SetGuestRoundingMode(void* ctx, unsigned int mode) override;
   virtual bool PopulatePseudoStacktrace(GuestPseudoStackTrace* st) override;
-
-  bool trace_instr_available() const override;
-  bool trace_data_available() const override;
-  bool trace_func_available() const override;
-  bool trace_instr_enabled() const override;
-  void set_trace_instr_enabled(bool value) override;
-  bool trace_data_enabled() const override;
-  void set_trace_data_enabled(bool value) override;
-  bool trace_func_enabled() const override;
-  void set_trace_func_enabled(bool value) override;
-
   void RecordMMIOExceptionForGuestInstruction(void* host_address);
 
   uint32_t LookupXMMConstantAddress32(unsigned index) {
@@ -248,7 +228,6 @@ class X64Backend : public Backend {
   // range that will be used to dispatch to host code
   BitMap guest_trampoline_address_bitmap_;
   uint8_t* guest_trampoline_memory_;
-  bool guest_trampolines_sub4gb_ = false;
 };
 
 }  // namespace x64

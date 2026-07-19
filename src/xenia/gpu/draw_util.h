@@ -12,12 +12,10 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <utility>
 #include <vector>
 
 #include "xenia/base/assert.h"
-#include "xenia/gpu/primitive_processor.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/shader.h"
 #include "xenia/gpu/trace_writer.h"
@@ -234,22 +232,6 @@ inline int32_t GetD3D10IntegerPolygonOffset(
   }
   return polygon_offset < 0 ? -polygon_offset_int : polygon_offset_int;
 }
-
-struct HostDepthPolygonOffset {
-  float front_scale = 0.0f;
-  float front_offset = 0.0f;
-  float back_scale = 0.0f;
-  float back_offset = 0.0f;
-};
-
-// Detects a narrow type of coplanar redraws that tend to Z-fight when the depth
-// bias is applied via host fixed function polygon offset, like static decals in
-// UE3 and Halo engine titles. Host space offsets are computed so that the depth
-// bias is applied via shader depth output instead.
-bool GetHostDepthPolygonOffsetIfNeeded(
-    const RegisterFile& regs, bool primitive_polygonal,
-    reg::RB_DEPTHCONTROL normalized_depth_control,
-    uint32_t normalized_color_mask, HostDepthPolygonOffset& polygon_offset_out);
 
 // For hosts not supporting separate front and back polygon offsets, returns the
 // polygon offset for the face which likely needs the offset the most (and that
@@ -554,7 +536,7 @@ union ResolveCoordinateInfo {
     // May be zero if the original rectangle was somehow specified in a
     // totally broken way - in this case, the resolve must be dropped.
     uint32_t width_div_8 : xenos::kResolveSizeBits -
-        xenos::kResolveAlignmentPixelsLog2;
+                           xenos::kResolveAlignmentPixelsLog2;
 
     // 1 to 7.
     uint32_t draw_resolution_scale_x : 3;
@@ -577,9 +559,9 @@ union ResolveCopyDestCoordinateInfo {
   struct {
     // 0...16384/32.
     uint32_t pitch_aligned_div_32 : xenos::kTexture2DCubeMaxWidthHeightLog2 +
-        2 - xenos::kTextureTileWidthHeightLog2;
+                                    2 - xenos::kTextureTileWidthHeightLog2;
     uint32_t height_aligned_div_32 : xenos::kTexture2DCubeMaxWidthHeightLog2 +
-        2 - xenos::kTextureTileWidthHeightLog2;
+                                     2 - xenos::kTextureTileWidthHeightLog2;
 
     // Up to the maximum period of the texture tiled address function (128x128
     // for 2D 1bpb).
@@ -782,111 +764,12 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
                     bool fixed_rgba16_truncated_to_minus_1_to_1,
                     ResolveInfo& info_out);
 
-// Returns log2 of the copy destination texel size in bytes from a Resolve's
-// copy_dest_info (format already normalized) - the derivation GetResolveInfo
-// used for the destination extent.
+// Returns log2 of the resolve copy destination texel size in bytes for the
+// destination info previously returned by a render target cache Resolve (with
+// the format already normalized to the actual xenos::TextureFormat) - the same
+// derivation the destination extent was calculated with in GetResolveInfo.
 uint32_t GetResolveDownscalePixelSizeLog2(
     reg::RB_COPY_DEST_INFO copy_dest_info);
-
-// Maximum length for debug marker labels.
-static constexpr size_t kDebugMarkerLabelMaxLength = 256;
-
-// Returns the MSAA sample count as a string for debug markers.
-inline const char* GetMsaaSamplesString(xenos::MsaaSamples msaa_samples) {
-  switch (msaa_samples) {
-    case xenos::MsaaSamples::k2X:
-      return "2x";
-    case xenos::MsaaSamples::k4X:
-      return "4x";
-    default:
-      return "1x";
-  }
-}
-
-// Formats a debug marker string for resolve copy operations (EDRAM reads).
-// Used by D3D12 and Vulkan backends.
-inline void FormatResolveCopyDebugMarker(char* buffer, size_t buffer_size,
-                                         const ResolveInfo& resolve_info) {
-  ResolveEdramInfo edram_info = resolve_info.IsCopyingDepth()
-                                    ? resolve_info.depth_edram_info
-                                    : resolve_info.color_edram_info;
-  std::snprintf(buffer, buffer_size,
-                "EDRAM Read: Resolve %s %s to 0x%08X, %u bytes, %ux%u",
-                edram_info.is_depth ? "depth" : "color",
-                GetMsaaSamplesString(edram_info.msaa_samples),
-                resolve_info.copy_dest_extent_start,
-                resolve_info.copy_dest_extent_length,
-                resolve_info.coordinate_info.width_div_8 * 8,
-                resolve_info.height_div_8 * 8);
-}
-
-// Formats a debug marker string for resolve clear operations (EDRAM writes).
-// Used by D3D12 and Vulkan backends.
-inline void FormatResolveClearDebugMarker(char* buffer, size_t buffer_size,
-                                          const ResolveInfo& resolve_info,
-                                          bool clear_depth, bool clear_color) {
-  if (clear_depth && clear_color) {
-    std::snprintf(buffer, buffer_size,
-                  "EDRAM Write: Resolve Clear depth=0x%08X color=0x%08X",
-                  resolve_info.rb_depth_clear, resolve_info.rb_color_clear);
-  } else if (clear_depth) {
-    std::snprintf(buffer, buffer_size,
-                  "EDRAM Write: Resolve Clear depth=0x%08X",
-                  resolve_info.rb_depth_clear);
-  } else {
-    std::snprintf(buffer, buffer_size,
-                  "EDRAM Write: Resolve Clear color=0x%08X",
-                  resolve_info.rb_color_clear);
-  }
-}
-
-// Formats a debug marker string for draw calls. Used by D3D12 and Vulkan
-// backends to create consistent debug annotations for tools like RenderDoc/PIX.
-inline void FormatDrawDebugMarker(
-    char* buffer, size_t buffer_size, xenos::PrimitiveType prim_type,
-    const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
-    uint64_t vs_hash, uint64_t ps_hash) {
-  const char* index_info = "auto";
-  if (primitive_processing_result.index_buffer_type ==
-      PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
-    index_info = primitive_processing_result.host_index_format ==
-                         xenos::IndexFormat::kInt32
-                     ? "idx32"
-                     : "idx16";
-  } else if (primitive_processing_result.index_buffer_type !=
-             PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
-    index_info = "idx-conv";
-  }
-
-  if (primitive_processing_result.IsTessellated()) {
-    const char* tess_mode = "unknown";
-    switch (primitive_processing_result.tessellation_mode) {
-      case xenos::TessellationMode::kDiscrete:
-        tess_mode = "discrete";
-        break;
-      case xenos::TessellationMode::kContinuous:
-        tess_mode = "continuous";
-        break;
-      case xenos::TessellationMode::kAdaptive:
-        tess_mode = "adaptive";
-        break;
-    }
-    std::snprintf(buffer, buffer_size,
-                  "IssueDraw: %s verts:%u %s tess:%s vs:%016llX ps:%016llX",
-                  xenos::GetPrimitiveTypeEnglishDescription(prim_type),
-                  primitive_processing_result.host_draw_vertex_count,
-                  index_info, tess_mode,
-                  static_cast<unsigned long long>(vs_hash),
-                  static_cast<unsigned long long>(ps_hash));
-  } else {
-    std::snprintf(buffer, buffer_size,
-                  "IssueDraw: %s verts:%u %s vs:%016llX ps:%016llX",
-                  xenos::GetPrimitiveTypeEnglishDescription(prim_type),
-                  primitive_processing_result.host_draw_vertex_count,
-                  index_info, static_cast<unsigned long long>(vs_hash),
-                  static_cast<unsigned long long>(ps_hash));
-  }
-}
 
 }  // namespace draw_util
 }  // namespace gpu

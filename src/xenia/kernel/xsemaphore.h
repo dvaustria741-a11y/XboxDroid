@@ -40,7 +40,6 @@ class XSemaphore : public XObject {
   xe::threading::WaitHandle* GetWaitHandle() override {
     return semaphore_.get();
   }
-  void WaitCallback() override;
 
  private:
   std::unique_ptr<xe::threading::Semaphore> semaphore_;
