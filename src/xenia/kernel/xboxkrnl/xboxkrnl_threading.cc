@@ -11,7 +11,6 @@
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/platform.h"
-#include "xenia/base/profiling.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -237,7 +236,6 @@ uint32_t NtResumeThread(uint32_t handle, uint32_t* suspend_count_ptr) {
 
 dword_result_t NtResumeThread_entry(dword_t handle,
                                     lpdword_t suspend_count_ptr) {
-  SCOPE_profile_cpu_i("guestsync", "NtResumeThread");
   uint32_t suspend_count =
       suspend_count_ptr ? static_cast<uint32_t>(*suspend_count_ptr) : 0u;
 
@@ -268,7 +266,6 @@ DECLARE_XBOXKRNL_EXPORT1(KeResumeThread, kThreading, kImplemented);
 dword_result_t NtSuspendThread_entry(dword_t handle,
                                      lpdword_t suspend_count_ptr,
                                      const ppc_context_t& context) {
-  SCOPE_profile_cpu_i("guestsync", "NtSuspendThread");
   X_RESULT result = X_STATUS_SUCCESS;
   uint32_t suspend_count = 0;
 
@@ -483,7 +480,6 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
                                             dword_t alertable,
                                             lpqword_t interval_ptr,
                                             const ppc_context_t& context) {
-  SCOPE_profile_cpu_i("guestsync", "KeDelayExecutionThread");
   uint64_t interval = interval_ptr ? static_cast<uint64_t>(*interval_ptr) : 0u;
   return KeDelayExecutionThread(processor_mode, alertable,
                                 interval_ptr ? &interval : nullptr, context);
@@ -492,7 +488,6 @@ DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
 
 dword_result_t NtYieldExecution_entry() {
-  SCOPE_profile_cpu_i("guestsync", "NtYieldExecution");
   if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
     kernel_state()->guest_scheduler()->YieldCurrentThread();
   } else {
@@ -1017,7 +1012,6 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
                                            dword_t processor_mode,
                                            dword_t alertable,
                                            lpqword_t timeout_ptr) {
-  SCOPE_profile_cpu_i("guestsync", "KeWaitForSingleObject");
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   return xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode,
                                  alertable, timeout_ptr ? &timeout : nullptr);
@@ -1051,7 +1045,6 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
                                              dword_t wait_mode,
                                              dword_t alertable,
                                              lpqword_t timeout_ptr) {
-  SCOPE_profile_cpu_i("guestsync", "NtWaitForSingleObjectEx");
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   return NtWaitForSingleObjectEx(object_handle, wait_mode, alertable,
                                  timeout_ptr ? &timeout : nullptr);
@@ -1063,7 +1056,6 @@ dword_result_t KeWaitForMultipleObjects_entry(
     dword_t count, lpdword_t objects_ptr, dword_t wait_type,
     dword_t wait_reason, dword_t processor_mode, dword_t alertable,
     lpqword_t timeout_ptr, lpvoid_t wait_block_array_ptr) {
-  SCOPE_profile_cpu_i("guestsync", "KeWaitForMultipleObjects");
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
 
   assert_true(count <= 64);
@@ -1140,7 +1132,6 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, xe::be<uint32_t>* handles,
 dword_result_t NtWaitForMultipleObjectsEx_entry(
     dword_t count, lpdword_t handles, dword_t wait_type, dword_t wait_mode,
     dword_t alertable, lpqword_t timeout_ptr) {
-  SCOPE_profile_cpu_i("guestsync", "NtWaitForMultipleObjectsEx");
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   if (!count || count > 64 ||
       (wait_type != X_KWAIT_REASON::WaitAny && wait_type)) {
@@ -1190,7 +1181,6 @@ static void PrefetchForCAS(const void* value) { swcache::PrefetchW(value); }
 
 uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
                                bool change_irql) {
-  SCOPE_profile_cpu_i("guestsync", "SpinLockAcquire");
   auto old_irql = change_irql ? xeKfRaiseIrql(ctx, 2) : 0;
 
   PrefetchForCAS(lock);
