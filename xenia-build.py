@@ -477,15 +477,6 @@ def fetch_data_repos():
             "branch": "main",
         },
         {
-            "name": "xenia-manager-database",
-            "url": "https://github.com/xenia-manager/database.git",
-            "branch": "main",
-            "sparse_paths": [
-                "data/game-compatibility/canary.json",
-                "data/game-compatibility/stable.json",
-            ],
-        },
-        {
             "name": "x360db",
             "url": "https://github.com/xenia-manager/x360db.git",
             "branch": "main",
@@ -527,10 +518,17 @@ def fetch_data_repos():
                 repo_path,
             ])
 
-    # Download compatibility data from xenia-canary/game-compatibility release.
-    # Falls back to xenia-manager/database if the download fails.
+    # Assemble the game-compatibility bake dir. compatibility_data.json comes
+    # from the xenia-canary/game-compatibility release. master.json is vendored.
     compat_dir = os.path.join(data_dir, "game-compatibility")
     os.makedirs(compat_dir, exist_ok=True)
+
+    vendored_master = os.path.join("assets", "game-compatibility", "master.json")
+    if os.path.isfile(vendored_master):
+        copy2(vendored_master, os.path.join(compat_dir, "master.json"))
+    else:
+        print_warning("vendored master.json not found at " + vendored_master)
+
     compat_url = (
         "https://github.com/xenia-canary/game-compatibility/releases/download/"
         "game-compatibility/compatibility_data.json"
@@ -539,16 +537,15 @@ def fetch_data_repos():
     compat_path = os.path.join(compat_dir, "compatibility_data.json")
     print("  - downloading compatibility_data.json...")
     max_attempts = 3
-    downloaded = False
     if compat_url_parsed.scheme != "https":
-        print_warning("compatibility_data URL is not valid, skipping download")
+        print_error("compatibility_data URL is not https")
+        sys.exit(1)
     else:
         for attempt in range(1, max_attempts + 1):
             tmp_path = compat_path + ".tmp"
             try:
                 urllib.request.urlretrieve(compat_url, tmp_path)
                 os.replace(tmp_path, compat_path)
-                downloaded = True
                 break
             except (urllib.error.URLError, OSError) as e:
                 if os.path.exists(tmp_path):
@@ -557,21 +554,9 @@ def fetch_data_repos():
                     print(f"  - attempt {attempt}/{max_attempts} failed: {e}, retrying...")
                     time.sleep(2 * attempt)
                 else:
-                    print_warning(f"compatibility_data.json download failed after "
+                    print_error(f"compatibility_data.json download failed after "
                                 f"{max_attempts} attempts: {e}")
-    if not downloaded:
-        # Fall back to xenia-manager/database compatibility data.
-        fallback_src = os.path.join(data_dir, "xenia-manager-database",
-                                    "data", "game-compatibility")
-        if os.path.isdir(fallback_src):
-            for f in os.listdir(fallback_src):
-                copy2(os.path.join(fallback_src, f),
-                       os.path.join(compat_dir, f))
-            print("  - using xenia-manager/database compatibility data as fallback")
-        else:
-            print_error("no compatibility data available (download failed and "
-                        "xenia-manager/database fallback not found)")
-            sys.exit(1)
+                    sys.exit(1)
 
 
 def get_cc(cc=None):
