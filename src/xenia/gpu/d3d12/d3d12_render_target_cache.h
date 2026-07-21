@@ -55,6 +55,14 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
         bindless_resources_used_(bindless_resources_used) {}
   ~D3D12RenderTargetCache() override;
 
+  // Shader code for resolve copy operations.
+  struct ResolveCopyShaderCode {
+    const void* unscaled;
+    size_t unscaled_size;
+    const void* scaled;
+    size_t scaled_size;
+  };
+
   bool Initialize();
   void Shutdown(bool from_destructor = false);
 
@@ -83,10 +91,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   // Performs the resolve to a shared memory area according to the current
   // register values, and also clears the render targets if needed. Must be in a
-  // frame for calling. copy_dest_info_out, if not null, receives the
-  // destination info with the format normalized to the xenos::TextureFormat
-  // the copy was actually performed with (only meaningful when a nonzero
-  // length was written).
+  // frame for calling.
   bool Resolve(const Memory& memory, D3D12SharedMemory& shared_memory,
                D3D12TextureCache& texture_cache, uint32_t& written_address_out,
                uint32_t& written_length_out,
@@ -212,14 +217,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   // Parameter 1 - destination (shared memory or a part of it).
   // Parameter 2 - source (EDRAM).
   ID3D12RootSignature* resolve_copy_root_signature_ = nullptr;
-  struct ResolveCopyShaderCode {
-    const void* unscaled;
-    size_t unscaled_size;
-    const void* scaled;
-    size_t scaled_size;
-  };
-  static const ResolveCopyShaderCode
-      kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
   ID3D12PipelineState* resolve_copy_pipelines_[size_t(
       draw_util::ResolveCopyShaderIndex::kCount)] = {};
 
@@ -435,6 +432,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
       // swapping of 40-sample columns as opposed to the host render target -
       // this is done only for the color source).
       uint32_t host_depth_source_is_copy : 1;
+      // Decode (not bit-reinterpret) a 7e3 <-> 8_8_8_8 reuse. See
+      // IsTransferValueConverted7e3And8888.
+      uint32_t value_convert : 1;
 
       // Last bits because this affects the root signature - after sorting, only
       // change it as fewer times as possible. Depth buffers have an additional
@@ -800,6 +800,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   // Temporary storage for DXBC building.
   std::vector<uint32_t> built_shader_;
+  // Converts the hand-built DXBC transfer pixel shaders to DXIL so they can
+  // pair with the DXIL passthrough vertex shader in a single pipeline.
+  IDxbcConverter* dxbc_to_dxil_converter_ = nullptr;
 
   // For rasterizer-ordered view (pixel shader interlock).
 

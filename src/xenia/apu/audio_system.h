@@ -11,6 +11,7 @@
 #define XENIA_APU_AUDIO_SYSTEM_H_
 
 #include <atomic>
+#include <mutex>
 
 #include "xenia/base/mutex.h"
 #include "xenia/base/threading.h"
@@ -29,6 +30,9 @@ class XmaDecoder;
 
 class AudioSystem {
  public:
+  // TODO(gibbed): respect XAUDIO2_MAX_QUEUED_BUFFERS somehow (ie min(64,
+  // XAUDIO2_MAX_QUEUED_BUFFERS))
+  static constexpr size_t kMinimumQueuedFrames = 4;
   static constexpr size_t kMaximumQueuedFrames = 64;
   static constexpr uint32_t kAudioPumpInterval = 5333u;
   static constexpr uint32_t kAudioIntervalSlack = 400u;
@@ -48,6 +52,14 @@ class AudioSystem {
                           size_t* out_index);
   void UnregisterClient(size_t index);
   void SubmitFrame(size_t index, float* samples);
+
+  // Get performance statistics for a client
+  struct ClientPerformance {
+    uint32_t frames_submitted;
+    uint32_t frames_processed;
+    uint32_t frames_dropped;
+  };
+  bool GetClientPerformance(size_t index, ClientPerformance* out_perf);
 
   // Creates an independent, non-registered driver instance.
   virtual AudioDriver* CreateDriver(xe::threading::Semaphore* semaphore,
@@ -76,26 +88,34 @@ class AudioSystem {
   Memory* memory_ = nullptr;
   cpu::Processor* processor_ = nullptr;
   std::unique_ptr<XmaDecoder> xma_decoder_;
+  uint32_t queued_frames_;
 
   std::atomic<bool> worker_running_ = {false};
   kernel::object_ref<kernel::XHostThread> worker_thread_;
 
   xe::global_critical_region global_critical_region_;
   static constexpr size_t kMaximumClientCount = 8;
-  struct {
-    AudioDriver* driver;
-    uint64_t next_pump_us;
-    uint32_t callback;
-    uint32_t callback_arg;
-    uint32_t wrapped_callback_arg;
-    bool in_use;
-  } clients_[kMaximumClientCount];
+  struct ClientSlot {
+    AudioDriver* driver = nullptr;
+    uint32_t callback = 0;
+    uint32_t callback_arg = 0;
+    uint32_t wrapped_callback_arg = 0;
+    bool in_use = false;
+    // Wall-clock deadline for this client's next pump.
+    uint64_t next_pump_us = 0;
+    std::atomic<uint32_t> frames_submitted{0};
+    std::atomic<uint32_t> frames_processed{0};
+    std::atomic<uint32_t> frames_dropped{0};
+    // Held by worker during Execute; UnregisterClient waits on it.
+    std::mutex callback_mutex;
+  };
+  ClientSlot clients_[kMaximumClientCount];
 
   int FindFreeClient();
 
   std::unique_ptr<xe::threading::Semaphore>
       client_semaphores_[kMaximumClientCount];
-  // Event is always there in case we have no clients.
+  // Wakes the worker to re-scan clients on register, shutdown, and pause.
   std::unique_ptr<xe::threading::Event> pending_work_event_;
 
   bool paused_ = false;

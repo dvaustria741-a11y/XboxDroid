@@ -58,6 +58,13 @@ enum MemoryProtectFlag : uint32_t {
   kMemoryProtectNoAccess = 0,
 };
 
+// Write-combine memory is CPU-writable (for GPU uploads), so treat it
+// as writable alongside the regular write flag.
+inline bool IsWritableProtect(uint32_t protect) {
+  return (protect & kMemoryProtectWrite) ||
+         (protect & kMemoryProtectWriteCombine);
+}
+
 // Equivalent to the Win32 MEMORY_BASIC_INFORMATION struct.
 struct HeapAllocationInfo {
   // A pointer to the base address of the region of pages.
@@ -127,6 +134,10 @@ class BaseHeap {
 
   // Type of specified heap
   HeapType heap_type() const { return heap_type_; }
+
+  // Set only via Memory::SetPhysicalAliasSkipHostProtect.
+  bool skip_host_protect() const { return skip_host_protect_; }
+  void set_skip_host_protect(bool value) { skip_host_protect_ = value; }
 
   // Offset added to the virtual addresses to convert them to host addresses
   // (not including membase).
@@ -220,6 +231,10 @@ class BaseHeap {
   // Inserts a free block and coalesces with adjacent free blocks.
   void InsertFreeBlock(uint32_t start_page, uint32_t page_count);
 
+  // Guest protection updates page_table_ but not the host mapping. Set on the
+  // physical alias while a GPU import holds a page pin over it.
+  bool skip_host_protect_ = false;
+
   Memory* memory_;
   uint8_t* membase_;
   HeapType heap_type_;
@@ -285,7 +300,11 @@ class PhysicalHeap : public BaseHeap {
   void EnableAccessCallbacks(uint32_t physical_address, uint32_t length,
                              bool enable_invalidation_notifications,
                              bool enable_data_providers);
-  template <bool enable_invalidation_notifications>
+  // Raw guest protection bits for the physical page in this heap (0 if it
+  // doesn't map here), and that decoded to a PageAccess.
+  uint32_t GetPageProtect(uint32_t physical_address);
+  xe::memory::PageAccess GetPageAccess(uint32_t physical_address);
+  template <bool enable_invalidation_notifications, bool enable_data_providers>
   XE_NOINLINE void EnableAccessCallbacksInner(
       const uint32_t system_page_first, const uint32_t system_page_last,
       xe::memory::PageAccess protect_access) XE_RESTRICT;
@@ -299,8 +318,12 @@ class PhysicalHeap : public BaseHeap {
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
   uint32_t SystemPagenumToGuestPagenum(uint32_t num) const {
-    return ((num << system_page_shift_) - host_address_offset()) >>
-           page_size_shift_;
+    uint32_t system_base = num << system_page_shift_;
+    uint32_t offset = host_address_offset();
+    if (system_base < offset) {
+      return 0;
+    }
+    return (system_base - offset) >> page_size_shift_;
   }
 
   uint32_t GuestPagenumToSystemPagenum(uint32_t num) {
@@ -321,7 +344,10 @@ class PhysicalHeap : public BaseHeap {
   struct SystemPageFlagsBlock {
     // Whether writing to each page should result trigger invalidation
     // callbacks.
-    uint64_t notify_on_invalidation;
+    uint64_t notify_on_invalidation = 0;
+    // Whether the first access of each page triggers read callbacks. These
+    // pages are protected no-access. The watch is one-shot, cleared on access.
+    uint64_t notify_on_read = 0;
   };
   // Protected by global_critical_region. Flags for each 64 system pages,
   // interleaved as blocks, so bit scan can be used to quickly extract ranges.
@@ -398,6 +424,13 @@ class Memory {
   // Base address of physical memory in the host address space.
   // This is often something like 0x200000000.
   inline uint8_t* physical_membase() const { return physical_membase_; }
+
+  // The file mapping backing all guest memory views. Lets a consumer map its
+  // own separate view of guest RAM, e.g. to hand to a GPU heap import, without
+  // colliding with the write-watch protection on the managed views.
+  inline xe::memory::FileMappingHandle mapping_handle() const {
+    return mapping_;
+  }
 
   // Translates a guest physical address to a host address that can be accessed
   // as a normal pointer.
@@ -501,11 +534,34 @@ class Memory {
   // RegisterPhysicalMemoryInvalidationCallback.
   void UnregisterPhysicalMemoryInvalidationCallback(void* callback_handle);
 
+  // Called on the first CPU access of a page armed as a read watch (via
+  // EnablePhysicalMemoryAccessCallbacks with data providers). The page is
+  // downgraded and unwatched right after, so it fires once per arm. Must be
+  // lightweight and non-blocking. It runs in the fault handler under the global
+  // critical region.
+  typedef void (*PhysicalMemoryReadCallback)(void* context_ptr,
+                                             uint32_t physical_address_start,
+                                             uint32_t length);
+  void* RegisterPhysicalMemoryReadCallback(PhysicalMemoryReadCallback callback,
+                                           void* callback_context);
+  void UnregisterPhysicalMemoryReadCallback(void* callback_handle);
+
   // Enables physical memory access callbacks for the specified memory range,
   // snapped to system page boundaries.
   void EnablePhysicalMemoryAccessCallbacks(
       uint32_t physical_address, uint32_t length,
       bool enable_invalidation_notifications, bool enable_data_providers);
+
+  // Most-permissive access for the physical page across the physical windows:
+  // kNoAccess (mapped in none of them), kReadOnly (readable but not writable in
+  // any), or kReadWrite (writable in at least one, so a write watch can catch
+  // it).
+  xe::memory::PageAccess GetPhysicalPageWindowAccess(uint32_t physical_address);
+
+  // Keeps physical_membase_ writable while a GPU import pins it - any mprotect
+  // there fails the next submit. Guest protection still applies to the physical
+  // windows, and the alias never triggers access callbacks.
+  void SetPhysicalAliasSkipHostProtect(bool skip);
 
   // Forces triggering of watch callbacks for a virtual address range if pages
   // are watched there and unwatching them. Returns whether any page was
@@ -557,6 +613,9 @@ class Memory {
                                          void* context);
 
  private:
+#if XE_PLATFORM_MAC
+  int MapViewsMac();
+#endif
   int MapViews(uint8_t* mapping_base);
   void UnmapViews();
 
@@ -613,6 +672,8 @@ class Memory {
   xe::global_critical_region global_critical_region_;
   std::vector<std::pair<PhysicalMemoryInvalidationCallback, void*>*>
       physical_memory_invalidation_callbacks_;
+  std::vector<std::pair<PhysicalMemoryReadCallback, void*>*>
+      physical_memory_read_callbacks_;
 };
 
 }  // namespace xe
