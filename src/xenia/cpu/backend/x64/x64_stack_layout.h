@@ -88,17 +88,10 @@ class StackLayout {
    *  | (rdx home)       | (rdx home)       | rsp + 0x110
    *  +------------------+------------------+
    */
-  // System V (Linux/macOS) xmm6-15 are caller-saved, so the thunk spills them
-  // here too; Windows keeps them callee-saved and uses only the lower slots.
-#if XE_PLATFORM_WIN32
-  static constexpr size_t kThunkXmmCount = 10;
-#else
-  static constexpr size_t kThunkXmmCount = 16;
-#endif
   XEPACKEDSTRUCT(Thunk, {
     uint64_t arg_temp[3];
     uint64_t r[9];
-    vec128_t xmm[kThunkXmmCount];
+    vec128_t xmm[10];
   });
   static_assert(sizeof(Thunk) % 16 == 0,
                 "sizeof(Thunk) must be a multiple of 16!");
@@ -132,9 +125,6 @@ class StackLayout {
   // was GUEST_CTX_HOME, can't remove because that'd throw stack alignment off.
   // instead, can be used as a temporary in sequences
   static constexpr size_t GUEST_SCRATCH = 0;
-  // Three qwords above the argument home area, so unlike GUEST_SCRATCH they
-  // survive a call. Used where rsp must stay put for the unwind info.
-  static constexpr size_t GUEST_PREEMPT_SAVE = 32;
 
   // when profiling is on, this stores the nanosecond time at the start of the
   // function

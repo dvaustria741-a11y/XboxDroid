@@ -12,7 +12,6 @@
 #include "xenia/base/png_utils.h"
 #include "xenia/base/system.h"
 #include "xenia/hid/input_system.h"
-#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_content_device.h"
@@ -74,7 +73,7 @@ X_RESULT xeXamDispatchDialog(T* dialog,
         kernel_state()->emulator()->display_window()->app_context();
     if (app_context.CallInUIThreadSynchronous(
             [&dialog, &fence]() { dialog->Then(&fence); })) {
-      GuestScheduler::WaitOnFence(fence);
+      fence.Wait();
       kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
     } else {
       delete dialog;
@@ -118,7 +117,7 @@ X_RESULT xeXamDispatchDialogEx(
     xe::threading::Fence fence;
     if (display_window->app_context().CallInUIThreadSynchronous(
             [&dialog, &fence]() { dialog->Then(&fence); })) {
-      GuestScheduler::WaitOnFence(fence);
+      fence.Wait();
       kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
     } else {
       delete dialog;
@@ -239,33 +238,25 @@ X_RESULT xeXamDispatchHeadlessAsync(std::function<void()> run_callback) {
 }
 
 void MessageBoxDialog::OnDraw(ImGuiIO& io) {
+  bool first_draw = false;
   if (!has_opened_) {
     ImGui::OpenPopup(title_.c_str());
     has_opened_ = true;
+    first_draw = true;
   }
   if (ImGui::BeginPopupModal(title_.c_str(), nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
-    // Handle keyboard escape or gamepad B/Back to cancel
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ShouldCloseFromGamepad()) {
-      chosen_button_ = default_button_;
-      ImGui::CloseCurrentPopup();
-      Close();
-    }
-
     if (description_.size()) {
       ImGui::Text("%s", description_.c_str());
     }
-
-    // Buttons - ImGui handles navigation, A button activates via ImGui
+    if (first_draw) {
+      ImGui::SetKeyboardFocusHere();
+    }
     for (size_t i = 0; i < buttons_.size(); ++i) {
       if (ImGui::Button(buttons_[i].c_str())) {
         chosen_button_ = static_cast<uint32_t>(i);
         ImGui::CloseCurrentPopup();
         Close();
-      }
-      // Set default focus on the default button
-      if (i == default_button_) {
-        ImGui::SetItemDefaultFocus();
       }
       ImGui::SameLine();
     }
@@ -278,52 +269,21 @@ void MessageBoxDialog::OnDraw(ImGuiIO& io) {
 }
 
 void KeyboardInputDialog::OnDraw(ImGuiIO& io) {
+  bool first_draw = false;
   if (!has_opened_) {
     ImGui::OpenPopup(title_.c_str());
     has_opened_ = true;
+    first_draw = true;
   }
-
-  // Center the window on screen
-  ImVec2 center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
-  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSizeConstraints(ImVec2(350, 0), ImVec2(500, 300));
-
-  // Style like Xbox - white background, black text, Xbox green highlights
-  const ImVec4 xbox_green(0.063f, 0.486f, 0.063f, 1.0f);
-  ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
-  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-  ImGui::PushStyleColor(ImGuiCol_TitleBg, xbox_green);
-  ImGui::PushStyleColor(ImGuiCol_TitleBgActive, xbox_green);
-  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.9f, 0.9f, 1.0f));
-  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, xbox_green);
-  ImGui::PushStyleColor(ImGuiCol_ButtonActive, xbox_green);
-  ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.95f, 0.95f, 0.95f, 1.0f));
-  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
-                        ImVec4(0.9f, 0.9f, 0.9f, 1.0f));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 16));
-
   if (ImGui::BeginPopupModal(title_.c_str(), nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
-    // Handle keyboard escape or gamepad B/Back to cancel
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ShouldCloseFromGamepad()) {
-      text_ = "";
-      cancelled_ = true;
-      ImGui::CloseCurrentPopup();
-      Close();
-    }
-
     if (description_.size()) {
       ImGui::TextWrapped("%s", description_.c_str());
     }
-
-    ImGui::PushID("input_text");
-    // Set focus to InputText on first frame
-    if (!focus_set_) {
+    if (first_draw) {
       ImGui::SetKeyboardFocusHere();
-      focus_set_ = true;
     }
+    ImGui::PushID("input_text");
     bool input_submitted =
         ImGui::InputText("##body", text_buffer_.data(), text_buffer_.size(),
                          ImGuiInputTextFlags_EnterReturnsTrue);
@@ -339,26 +299,19 @@ void KeyboardInputDialog::OnDraw(ImGuiIO& io) {
       ImGui::EndPopup();
     }
     ImGui::PopID();
-
     if (input_submitted) {
       text_ = std::string(text_buffer_.data(), text_buffer_.size());
       cancelled_ = false;
       ImGui::CloseCurrentPopup();
       Close();
     }
-
-    // OK button
     if (ImGui::Button("OK")) {
       text_ = std::string(text_buffer_.data(), text_buffer_.size());
       cancelled_ = false;
       ImGui::CloseCurrentPopup();
       Close();
     }
-    ImGui::SetItemDefaultFocus();
-
     ImGui::SameLine();
-
-    // Cancel button
     if (ImGui::Button("Cancel")) {
       text_ = "";
       cancelled_ = true;
@@ -370,9 +323,6 @@ void KeyboardInputDialog::OnDraw(ImGuiIO& io) {
   } else {
     Close();
   }
-
-  ImGui::PopStyleVar(2);
-  ImGui::PopStyleColor(10);
 }
 
 static dword_result_t XamShowMessageBoxUi(
@@ -427,7 +377,6 @@ static dword_result_t XamShowMessageBoxUi(
 
     const Emulator* emulator = kernel_state()->emulator();
     xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-    xe::hid::InputSystem* input_system = emulator->input_system();
 
     if (flags & XMBox_PASSCODEMODE || flags & XMBox_VERIFYPASSCODEMODE) {
       auto close = [result_ptr,
@@ -451,7 +400,7 @@ static dword_result_t XamShowMessageBoxUi(
       };
 
       result = xeXamDispatchDialog<MessageBoxDialog>(
-          new MessageBoxDialog(imgui_drawer, input_system, title, text, buttons,
+          new MessageBoxDialog(imgui_drawer, title, text, buttons,
                                static_cast<uint32_t>(active_button)),
           close, overlapped);
     }
@@ -567,32 +516,15 @@ dword_result_t XamShowKeyboardUI_entry(
 
     const Emulator* emulator = kernel_state()->emulator();
     xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-    xe::hid::InputSystem* input_system = emulator->input_system();
 
     std::string title_str = title ? xe::to_utf8(title.value()) : "";
     std::string desc_str = description ? xe::to_utf8(description.value()) : "";
     std::string def_text_str =
         default_text ? xe::to_utf8(default_text.value()) : "";
 
-    // If no default text provided, use the user's gamertag
-    if (def_text_str.empty()) {
-      auto profile_manager = kernel_state()->xam_state()->profile_manager();
-      if (profile_manager) {
-        // Try the specified user_index first, fall back to slot 0
-        auto profile =
-            profile_manager->GetProfile(static_cast<uint8_t>(user_index));
-        if (!profile) {
-          profile = profile_manager->GetProfile(static_cast<uint8_t>(0));
-        }
-        if (profile) {
-          def_text_str = profile->name();
-        }
-      }
-    }
-
     result = xeXamDispatchDialogEx<KeyboardInputDialog>(
-        new KeyboardInputDialog(imgui_drawer, input_system, title_str, desc_str,
-                                def_text_str, buffer_length),
+        new KeyboardInputDialog(imgui_drawer, title_str, desc_str, def_text_str,
+                                buffer_length),
         close, overlapped);
   }
   return result;
@@ -658,10 +590,9 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  xe::hid::InputSystem* input_system = emulator->input_system();
   return xeXamDispatchDialog<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, input_system, title, desc, buttons, 0),
-      close, overlapped);
+      new MessageBoxDialog(imgui_drawer, title, desc, buttons, 0), close,
+      overlapped);
 }
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
@@ -679,9 +610,8 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
 
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  xe::hid::InputSystem* input_system = emulator->input_system();
   xeXamDispatchDialog<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, input_system, title, desc, {"OK"}, 0),
+      new MessageBoxDialog(imgui_drawer, title, desc, {"OK"}, 0),
       [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
   // This is death, and should never return.
   // TODO(benvanik): cleaner exit.
@@ -855,10 +785,8 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
 
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  xe::hid::InputSystem* input_system = emulator->input_system();
   return xeXamDispatchDialogAsync<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, input_system, title, desc, buttons, 0),
-      close);
+      new MessageBoxDialog(imgui_drawer, title, desc, buttons, 0), close);
 }
 DECLARE_XAM_EXPORT1(XamShowMarketplaceUIEx, kUI, kSketchy);
 
@@ -941,10 +869,9 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
 
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
-  xe::hid::InputSystem* input_system = emulator->input_system();
   return xeXamDispatchDialog<MessageBoxDialog>(
-      new MessageBoxDialog(imgui_drawer, input_system, title, desc, buttons, 0),
-      close, overlapped);
+      new MessageBoxDialog(imgui_drawer, title, desc, buttons, 0), close,
+      overlapped);
 }
 DECLARE_XAM_EXPORT1(XamShowMarketplaceDownloadItemsUI, kUI, kSketchy);
 
@@ -963,31 +890,6 @@ bool xeDrawProfileContent(xe::ui::ImGuiDrawer* imgui_drawer,
                           uint64_t* selected_xuid) {
   const ImVec2 start_position = ImGui::GetCursorPos();
 
-  // Calculate the size for the selectable based on icon + text
-  const float text_height = ImGui::GetTextLineHeight() * 3;  // 3 lines of text
-  const ImVec2 content_size =
-      ImVec2(ImGui::GetContentRegionAvail().x,
-             std::max(xe::ui::default_image_icon_size.y, text_height));
-
-  // Draw selectable first as background
-  bool clicked = false;
-  if (xuid && selected_xuid) {
-    if (ImGui::Selectable("##Selectable", *selected_xuid == xuid,
-                          ImGuiSelectableFlags_SpanAllColumns |
-                              ImGuiSelectableFlags_AllowOverlap,
-                          content_size)) {
-      *selected_xuid = xuid;
-      clicked = true;
-    }
-    // Update selection when focus moves to this item
-    if (ImGui::IsItemFocused()) {
-      *selected_xuid = xuid;
-    }
-    // Reset cursor to draw content on top
-    ImGui::SetCursorPos(start_position);
-  }
-
-  // Draw content on top of selectable
   ImGui::BeginGroup();
   {
     if (profile_icon) {
@@ -1021,12 +923,22 @@ bool xeDrawProfileContent(xe::ui::ImGuiDrawer* imgui_drawer,
   }
   ImGui::EndGroup();
 
-  if (clicked) {
-    ImGui::OpenPopup("Profile Menu");
-  }
+  if (xuid && selected_xuid) {
+    const ImVec2 end_draw_position =
+        ImVec2(ImGui::GetCursorPos().x - start_position.x,
+               ImGui::GetCursorPos().y - start_position.y);
 
-  if (context_menu) {
-    return context_menu();
+    ImGui::SetCursorPos(start_position);
+    if (ImGui::Selectable("##Selectable", *selected_xuid == xuid,
+                          ImGuiSelectableFlags_SpanAllColumns,
+                          end_draw_position)) {
+      *selected_xuid = xuid;
+      ImGui::OpenPopup("Profile Menu");
+    }
+
+    if (context_menu) {
+      return context_menu();
+    }
   }
 
   return true;
@@ -1161,16 +1073,14 @@ dword_result_t XamShowAchievementsUI_entry(dword_t user_index,
 
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
-  xe::hid::InputSystem* input_system =
-      kernel_state()->emulator()->input_system();
 
   auto close = [](ui::GameAchievementsUI* dialog) -> void {};
   return xeXamDispatchDialogAsync<ui::GameAchievementsUI>(
-      new ui::GameAchievementsUI(imgui_drawer, input_system, &info.value(),
-                                 user),
+      new ui::GameAchievementsUI(imgui_drawer, ImVec2(100.f, 100.f),
+                                 &info.value(), user),
       close);
 }
-DECLARE_XAM_EXPORT1(XamShowAchievementsUI, kUserProfiles, kImplemented);
+DECLARE_XAM_EXPORT1(XamShowAchievementsUI, kUserProfiles, kStub);
 
 dword_result_t XamShowGamerCardUI_entry(dword_t user_index) {
   auto user = kernel_state()->xam_state()->GetUserProfile(user_index);

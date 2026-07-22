@@ -10,32 +10,11 @@
 #include "xenia/cpu/function.h"
 
 #include "xenia/base/logging.h"
-#include "xenia/base/profiling.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
 
 namespace xe {
 namespace cpu {
-
-#if XE_OPTION_PROFILING
-// Diagnostic: per-guest-address CPU scope for guest function dispatch. Only
-// catches host->guest entries and re-entrant callbacks, not direct guest->guest
-// JIT calls.
-namespace {
-struct GuestFnScope {
-  MicroProfileToken token;
-  uint64_t tick;
-  explicit GuestFnScope(uint32_t address)
-      : token(GetGuestFunctionToken(address)) {
-    tick = MicroProfileEnter(token);
-  }
-  ~GuestFnScope() { MicroProfileLeave(token, tick); }
-};
-}  // namespace
-#define GUEST_FN_SCOPE(address) GuestFnScope guest_fn_scope_(address)
-#else
-#define GUEST_FN_SCOPE(address)
-#endif
 
 Function::Function(Module* module, uint32_t address)
     : Symbol(Symbol::Type::kFunction, module, address) {}
@@ -57,7 +36,7 @@ void BuiltinFunction::SetupBuiltin(Handler handler, void* arg0, void* arg1) {
 }
 
 bool BuiltinFunction::Call(ThreadState* thread_state, uint32_t return_address) {
-  GUEST_FN_SCOPE(address());
+  // SCOPE_profile_cpu_f("cpu");
 
   ThreadState* original_thread_state = ThreadState::Get();
   if (original_thread_state != thread_state) {
@@ -151,7 +130,7 @@ uint32_t GuestFunction::MapMachineCodeToGuestAddress(
 }
 
 bool GuestFunction::Call(ThreadState* thread_state, uint32_t return_address) {
-  GUEST_FN_SCOPE(address());
+  // SCOPE_profile_cpu_f("cpu");
 
   ThreadState* original_thread_state = ThreadState::Get();
   if (original_thread_state != thread_state) {

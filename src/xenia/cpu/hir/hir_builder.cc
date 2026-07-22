@@ -811,10 +811,6 @@ void HIRBuilder::Nop() {
   i->src1.value = i->src2.value = i->src3.value = NULL;
 }
 
-Instr* HIRBuilder::CheckPreempt() {
-  return AppendInstr(OPCODE_CHECK_PREEMPT_info, 0);
-}
-
 void HIRBuilder::SourceOffset(uint32_t offset) {
   Instr* i = AppendInstr(OPCODE_SOURCE_OFFSET_info, 0);
   i->src1.offset = offset;
@@ -1358,8 +1354,6 @@ void HIRBuilder::CacheControl(Value* address, size_t cache_line_size,
 }
 
 void HIRBuilder::MemoryBarrier() { AppendInstr(OPCODE_MEMORY_BARRIER_info, 0); }
-
-void HIRBuilder::LoadBarrier() { AppendInstr(OPCODE_LOAD_BARRIER_info, 0); }
 
 void HIRBuilder::DelayExecution() {
   AppendInstr(OPCODE_DELAY_EXECUTION_info, 0);

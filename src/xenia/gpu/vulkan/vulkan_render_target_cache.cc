@@ -18,7 +18,6 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
-#include "xenia/base/profiling.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/registers.h"
@@ -31,7 +30,26 @@
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
-DECLARE_bool(vulkan_dynamic_rendering);
+DEFINE_string(
+    render_target_path_vulkan, "",
+    "Render target emulation path to use on Vulkan.\n"
+    "Use: [any, fbo, fsi]\n"
+    " fbo:\n"
+    "  Host framebuffers and fixed-function blending and depth / stencil "
+    "testing, copying between render targets when needed.\n"
+    "  Lower accuracy (limited pixel format support).\n"
+    "  Performance limited primarily by render target layout changes requiring "
+    "copying, but generally higher.\n"
+    " fsi:\n"
+    "  Manual pixel packing, blending and depth / stencil testing, with free "
+    "render target layout changes.\n"
+    "  Requires a GPU supporting fragment shader interlock.\n"
+    "  Highest accuracy (all pixel formats handled in software).\n"
+    "  Performance limited primarily by overdraw.\n"
+    " Any other value:\n"
+    "  Choose what is considered the most optimal for the system (currently "
+    "always FB because the FSI path is much slower now).",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -187,10 +205,6 @@ VulkanRenderTargetCache::~VulkanRenderTargetCache() { Shutdown(true); }
 bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
-
-  // Cache the SPIR-V version for utility shader creation.
-  spirv_version_ = SpirvShaderTranslator::Features(vulkan_device).spirv_version;
-
   const ui::vulkan::VulkanInstance::Functions& ifn =
       vulkan_device->vulkan_instance()->functions();
   const VkPhysicalDevice physical_device = vulkan_device->physical_device();
@@ -199,7 +213,7 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       vulkan_device->properties();
 
-  if (cvars::render_target_path == "accuracy") {
+  if (cvars::render_target_path_vulkan == "fsi") {
     path_ = Path::kPixelShaderInterlock;
   } else {
     path_ = Path::kHostRenderTargets;
@@ -495,15 +509,12 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
                 resolve_copy_shader_code.unscaled_size_bytes &&
                 resolve_copy_shader_code.scaled &&
                 resolve_copy_shader_code.scaled_size_bytes);
-    // Resolve copy shaders use 8x8 = 64 threads per group. Request wave64 mode
-    // on RDNA GPUs to ensure one full wave per group.
     VkPipeline resolve_copy_pipeline = ui::vulkan::util::CreateComputePipeline(
         vulkan_device, resolve_copy_pipeline_layout_,
         draw_resolution_scaled ? resolve_copy_shader_code.scaled
                                : resolve_copy_shader_code.unscaled,
         draw_resolution_scaled ? resolve_copy_shader_code.scaled_size_bytes
-                               : resolve_copy_shader_code.unscaled_size_bytes,
-        nullptr, "main", 64);
+                               : resolve_copy_shader_code.unscaled_size_bytes);
     if (resolve_copy_pipeline == VK_NULL_HANDLE) {
       XELOGE(
           "VulkanRenderTargetCache: Failed to create the resolve copy "
@@ -542,11 +553,9 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   if (path_ == Path::kHostRenderTargets) {
     // Host render targets.
 
-    // Store k_8_8_8_8_GAMMA as linear in R16G16B16A16_UNORM for conceptually
-    // correct blending in linear color space, with the linear <-> gamma color
-    // space conversion done in the pixel shader output, ownership transfer,
-    // resolve dump and clear paths. Requires the format to be usable as a
-    // blendable color attachment and as a sampled image (for transfers/dumps).
+    // Store k_8_8_8_8_GAMMA targets as linear UNORM16 for blending.
+    // Convert at EDRAM, transfer, clear, and dump boundaries. The format must
+    // be sampleable and support color attachment blending.
     constexpr VkFormatFeatureFlags kGammaUnorm16Features =
         VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
         VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
@@ -561,12 +570,6 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
          kGammaUnorm16Features) == kGammaUnorm16Features;
 
     depth_float24_round_ = cvars::depth_float24_round;
-    // In-PS conversion requires per-sample shading under MSAA for intersections
-    // to antialias; without sampleRateShading, fall back to transfer-time
-    // conversion so the host/PS encoding stays consistent across all draws.
-    depth_float24_convert_in_pixel_shader_ =
-        cvars::depth_float24_convert_in_pixel_shader &&
-        device_properties.sampleRateShading;
 
     // Host depth storing pipeline layout.
     VkDescriptorSetLayout host_depth_store_descriptor_set_layouts[] = {
@@ -612,13 +615,10 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     for (size_t i = 0; i < xe::countof(host_depth_store_shaders); ++i) {
       const std::pair<const uint32_t*, size_t> host_depth_store_shader =
           host_depth_store_shaders[i];
-      // Host depth store shaders use 8x8 = 64 threads per group. Request wave64
-      // mode on RDNA GPUs to ensure one full wave per group.
       VkPipeline host_depth_store_pipeline =
           ui::vulkan::util::CreateComputePipeline(
               vulkan_device, host_depth_store_pipeline_layout_,
-              host_depth_store_shader.first, host_depth_store_shader.second,
-              nullptr, "main", 64);
+              host_depth_store_shader.first, host_depth_store_shader.second);
       if (host_depth_store_pipeline == VK_NULL_HANDLE) {
         XELOGE(
             "VulkanRenderTargetCache: Failed to create the {}-sample host "
@@ -773,11 +773,8 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     // Piecewise linear gamma is 8-bit with programmable blending.
     gamma_render_target_as_unorm16_ = false;
 
-    // Always true float24 depth rounded to the nearest even, converted in the
-    // shader (FSI ignores depth_float24_convert_in_pixel_shader, but set it for
-    // parity with the host render target path).
+    // Always true float24 depth rounded to the nearest even.
     depth_float24_round_ = true;
-    depth_float24_convert_in_pixel_shader_ = true;
 
     // The pipeline layout and the pipelines for clearing the EDRAM buffer in
     // resolves.
@@ -807,15 +804,12 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
       Shutdown();
       return false;
     }
-    // Resolve clear shaders use 8x8 = 64 threads per group. Request wave64
-    // mode on RDNA GPUs to ensure one full wave per group.
     resolve_fsi_clear_32bpp_pipeline_ = ui::vulkan::util::CreateComputePipeline(
         vulkan_device, resolve_fsi_clear_pipeline_layout_,
         draw_resolution_scaled ? shaders::resolve_clear_32bpp_scaled_cs
                                : shaders::resolve_clear_32bpp_cs,
         draw_resolution_scaled ? sizeof(shaders::resolve_clear_32bpp_scaled_cs)
-                               : sizeof(shaders::resolve_clear_32bpp_cs),
-        nullptr, "main", 64);
+                               : sizeof(shaders::resolve_clear_32bpp_cs));
     if (resolve_fsi_clear_32bpp_pipeline_ == VK_NULL_HANDLE) {
       XELOGE(
           "VulkanRenderTargetCache: Failed to create the 32bpp resolve EDRAM "
@@ -828,8 +822,7 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
         draw_resolution_scaled ? shaders::resolve_clear_64bpp_scaled_cs
                                : shaders::resolve_clear_64bpp_cs,
         draw_resolution_scaled ? sizeof(shaders::resolve_clear_64bpp_scaled_cs)
-                               : sizeof(shaders::resolve_clear_64bpp_cs),
-        nullptr, "main", 64);
+                               : sizeof(shaders::resolve_clear_64bpp_cs));
     if (resolve_fsi_clear_64bpp_pipeline_ == VK_NULL_HANDLE) {
       XELOGE(
           "VulkanRenderTargetCache: Failed to create the 64bpp resolve EDRAM "
@@ -1088,7 +1081,6 @@ bool VulkanRenderTargetCache::Resolve(
     VulkanTextureCache& texture_cache, uint32_t& written_address_out,
     uint32_t& written_length_out, reg::RB_COPY_DEST_INFO* copy_dest_info_out,
     bool* written_scaled_out) {
-  SCOPE_profile_cpu_f("gpu");
   written_address_out = 0;
   written_length_out = 0;
   if (written_scaled_out) {
@@ -1102,8 +1094,15 @@ bool VulkanRenderTargetCache::Resolve(
           register_file(), memory, trace_writer_, draw_resolution_scale_x(),
           draw_resolution_scale_y(), IsFixedRG16TruncatedToMinus1To1(),
           IsFixedRGBA16TruncatedToMinus1To1(), resolve_info)) {
-    XELOGE("Resolve: GetResolveInfo failed");
     return false;
+  }
+
+  if (copy_dest_info_out) {
+    // The destination format in it is normalized by GetResolveInfo to the
+    // xenos::TextureFormat actually used for the copy (in particular, the
+    // depth format instead of the raw guest-specified one for depth copies) -
+    // the same value the destination extent was calculated for.
+    *copy_dest_info_out = resolve_info.copy_dest_info;
   }
 
   // Nothing to copy/clear.
@@ -1121,12 +1120,6 @@ bool VulkanRenderTargetCache::Resolve(
   // Copying.
   bool copied = false;
   if (resolve_info.copy_dest_extent_length) {
-    if (command_processor_.debug_markers_enabled()) {
-      char label[draw_util::kDebugMarkerLabelMaxLength];
-      draw_util::FormatResolveCopyDebugMarker(label, sizeof(label),
-                                              resolve_info);
-      command_processor_.PushDebugMarker("%s", label);
-    }
     // If everything owning the source is native, copy at 1x1 into shared
     // memory.
     bool copy_native = false;
@@ -1182,20 +1175,12 @@ bool VulkanRenderTargetCache::Resolve(
       } else {
         // TODO(Triang3l): Switching between descriptors if exceeding
         // maxStorageBufferRange.
-        // Bind the whole shared memory buffer persistently when possible
-        // (passing the destination byte offset via dest_base) instead of
-        // allocating and writing a per-resolve descriptor. Scaled resolves
-        // write to separate scaled buffers, so they use transient descriptors.
-        const bool use_persistent_dest =
-            texture_cache.shared_memory_persistent_descriptor_set() !=
-                VK_NULL_HANDLE &&
-            !draw_resolution_scaled;
+        // TODO(Triang3l): Use a single 512 MB shared memory binding if
+        // possible.
         VkDescriptorSet descriptor_set_dest =
-            use_persistent_dest
-                ? texture_cache.shared_memory_persistent_descriptor_set()
-                : command_processor_.AllocateSingleTransientDescriptor(
-                      VulkanCommandProcessor::SingleTransientDescriptorLayout ::
-                          kStorageBufferCompute);
+            command_processor_.AllocateSingleTransientDescriptor(
+                VulkanCommandProcessor::SingleTransientDescriptorLayout ::
+                    kStorageBufferCompute);
         if (descriptor_set_dest != VK_NULL_HANDLE) {
           // Write the destination descriptor.
           VkDescriptorBufferInfo write_descriptor_set_dest_buffer_info;
@@ -1262,7 +1247,7 @@ bool VulkanRenderTargetCache::Resolve(
             }
           }
 
-          if (!scaled_buffer_ready && !use_persistent_dest) {
+          if (!scaled_buffer_ready) {
             // Write unscaled or native resolves to shared memory.
             if (copy_dest_scaled) {
               XELOGW(
@@ -1279,24 +1264,22 @@ bool VulkanRenderTargetCache::Resolve(
                 resolve_info.copy_dest_base +
                 resolve_info.copy_dest_extent_length;
           }
-          if (!use_persistent_dest) {
-            VkWriteDescriptorSet write_descriptor_set_dest;
-            write_descriptor_set_dest.sType =
-                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write_descriptor_set_dest.pNext = nullptr;
-            write_descriptor_set_dest.dstSet = descriptor_set_dest;
-            write_descriptor_set_dest.dstBinding = 0;
-            write_descriptor_set_dest.dstArrayElement = 0;
-            write_descriptor_set_dest.descriptorCount = 1;
-            write_descriptor_set_dest.descriptorType =
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write_descriptor_set_dest.pImageInfo = nullptr;
-            write_descriptor_set_dest.pBufferInfo =
-                &write_descriptor_set_dest_buffer_info;
-            write_descriptor_set_dest.pTexelBufferView = nullptr;
-            dfn.vkUpdateDescriptorSets(device, 1, &write_descriptor_set_dest, 0,
-                                       nullptr);
-          }
+          VkWriteDescriptorSet write_descriptor_set_dest;
+          write_descriptor_set_dest.sType =
+              VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+          write_descriptor_set_dest.pNext = nullptr;
+          write_descriptor_set_dest.dstSet = descriptor_set_dest;
+          write_descriptor_set_dest.dstBinding = 0;
+          write_descriptor_set_dest.dstArrayElement = 0;
+          write_descriptor_set_dest.descriptorCount = 1;
+          write_descriptor_set_dest.descriptorType =
+              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+          write_descriptor_set_dest.pImageInfo = nullptr;
+          write_descriptor_set_dest.pBufferInfo =
+              &write_descriptor_set_dest_buffer_info;
+          write_descriptor_set_dest.pTexelBufferView = nullptr;
+          dfn.vkUpdateDescriptorSets(device, 1, &write_descriptor_set_dest, 0,
+                                     nullptr);
 
           // Submit the resolve.
           if (!scaled_buffer_ready) {
@@ -1353,15 +1336,11 @@ bool VulkanRenderTargetCache::Resolve(
                 sizeof(copy_shader_constants.dest_relative),
                 &copy_shader_constants.dest_relative);
           } else {
-            // TODO(Triang3l): Multiple shared memory bindings in case of
+            // TODO(Triang3l): Proper dest_base in case of one 512 MB shared
+            // memory binding, or multiple shared memory bindings in case of
             // splitting due to maxStorageBufferRange overflow.
-            if (!use_persistent_dest) {
-              // The descriptor is offset to the destination, so make dest_base
-              // relative to it. With the whole buffer bound persistently,
-              // dest_base stays the absolute byte offset.
-              copy_shader_constants.dest_base -=
-                  uint32_t(write_descriptor_set_dest_buffer_info.offset);
-            }
+            copy_shader_constants.dest_base -=
+                uint32_t(write_descriptor_set_dest_buffer_info.offset);
             command_buffer.CmdVkPushConstants(
                 copy_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                 sizeof(copy_shader_constants), &copy_shader_constants);
@@ -1399,11 +1378,6 @@ bool VulkanRenderTargetCache::Resolve(
               resolve_info.copy_dest_extent_length, scaled_buffer_ready);
           written_address_out = resolve_info.copy_dest_extent_start;
           written_length_out = resolve_info.copy_dest_extent_length;
-          if (copy_dest_info_out) {
-            // Normalized copy format (depth format for depth resolves) - the
-            // texel size the readback downscale expects for the extent.
-            *copy_dest_info_out = resolve_info.copy_dest_info;
-          }
           if (written_scaled_out) {
             *written_scaled_out = scaled_buffer_ready;
           }
@@ -1411,7 +1385,6 @@ bool VulkanRenderTargetCache::Resolve(
         }
       }
     }
-    command_processor_.PopDebugMarker();
   } else {
     copied = true;
   }
@@ -1421,12 +1394,6 @@ bool VulkanRenderTargetCache::Resolve(
   bool clear_depth = resolve_info.IsClearingDepth();
   bool clear_color = resolve_info.IsClearingColor();
   if (clear_depth || clear_color) {
-    if (command_processor_.debug_markers_enabled()) {
-      char label[draw_util::kDebugMarkerLabelMaxLength];
-      draw_util::FormatResolveClearDebugMarker(
-          label, sizeof(label), resolve_info, clear_depth, clear_color);
-      command_processor_.PushDebugMarker("%s", label);
-    }
     switch (GetPath()) {
       case Path::kHostRenderTargets: {
         Transfer::Rectangle clear_rectangle;
@@ -1509,7 +1476,6 @@ bool VulkanRenderTargetCache::Resolve(
       default:
         assert_unhandled_case(GetPath());
     }
-    command_processor_.PopDebugMarker();
   } else {
     cleared = true;
   }
@@ -1520,7 +1486,6 @@ bool VulkanRenderTargetCache::Resolve(
 bool VulkanRenderTargetCache::Update(
     bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask, const Shader& vertex_shader) {
-  SCOPE_profile_cpu_f("gpu");
   if (!RenderTargetCache::Update(is_rasterization_done,
                                  normalized_depth_control,
                                  normalized_color_mask, vertex_shader)) {
@@ -1662,60 +1627,6 @@ bool VulkanRenderTargetCache::Update(
   }
 
   return true;
-}
-
-void VulkanRenderTargetCache::GetLastUpdateRenderingAttachments(
-    VkRenderingAttachmentInfo* color_attachments,
-    uint32_t* color_attachment_count_out,
-    VkRenderingAttachmentInfo* depth_attachment,
-    VkRenderingAttachmentInfo* stencil_attachment) const {
-  RenderPassKey key = last_update_render_pass_key_;
-  const RenderTarget* const* rts = last_update_accumulated_render_targets();
-
-  // Initialize depth/stencil attachments. Must match what pipeline creation
-  // declared (depthAttachmentFormat from key.depth_and_color_used bit 0); null
-  // RT still consumes the slot with imageView=VK_NULL_HANDLE.
-  std::memset(depth_attachment, 0, sizeof(VkRenderingAttachmentInfo));
-  std::memset(stencil_attachment, 0, sizeof(VkRenderingAttachmentInfo));
-  if (key.depth_and_color_used & 0b1) {
-    depth_attachment->sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    stencil_attachment->sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    if (rts[0]) {
-      const auto* vulkan_rt = static_cast<const VulkanRenderTarget*>(rts[0]);
-      depth_attachment->imageView = vulkan_rt->view_depth_stencil();
-      depth_attachment->imageLayout = VulkanRenderTarget::kDepthDrawLayout;
-      depth_attachment->loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-      depth_attachment->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-      // Stencil uses the same view for depth-stencil formats.
-      *stencil_attachment = *depth_attachment;
-    }
-  }
-
-  // Set up color attachments. The slot count must match what pipeline creation
-  // declared (colorAttachmentCount from key.depth_and_color_used bits 1-4),
-  // otherwise the pipeline's FS may write a Location that has no destination
-  // and the result is undefined per the Vulkan spec - RADV hangs on this.
-  // Null RT entries get imageView=VK_NULL_HANDLE; writes to them are silently
-  // dropped per spec.
-  uint32_t color_attachment_count = 0;
-  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    VkRenderingAttachmentInfo& color_attachment = color_attachments[i];
-    std::memset(&color_attachment, 0, sizeof(VkRenderingAttachmentInfo));
-    if (!(key.depth_and_color_used & (1 << (1 + i)))) {
-      continue;
-    }
-    color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    color_attachment_count = i + 1;
-    if (!rts[1 + i]) {
-      continue;
-    }
-    const auto* vulkan_rt = static_cast<const VulkanRenderTarget*>(rts[1 + i]);
-    color_attachment.imageView = vulkan_rt->view_depth_color();
-    color_attachment.imageLayout = VulkanRenderTarget::kColorDrawLayout;
-    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  }
-  *color_attachment_count_out = color_attachment_count;
 }
 
 VkRenderPass VulkanRenderTargetCache::GetHostRenderTargetsRenderPass(
@@ -2047,10 +1958,6 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
     return nullptr;
   }
 
-  // Set debug name for the image.
-  std::string debug_name = key.GetDebugName();
-  vulkan_device->SetObjectName(VK_OBJECT_TYPE_IMAGE, image, debug_name.c_str());
-
   // Create the image views.
 
   VkImageViewCreateInfo view_create_info;
@@ -2198,14 +2105,12 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
 
 bool VulkanRenderTargetCache::IsHostDepthEncodingDifferent(
     xenos::DepthRenderTargetFormat format) const {
+  // TODO(Triang3l): Conversion directly in shaders.
   switch (format) {
     case xenos::DepthRenderTargetFormat::kD24S8:
       return !depth_unorm24_vulkan_format_supported();
     case xenos::DepthRenderTargetFormat::kD24FS8:
-      // When converting in the pixel shader, the host float32 depth already
-      // holds float24-grid values, so it's the canonical encoding and the
-      // separate host depth tracking isn't needed.
-      return !depth_float24_convert_in_pixel_shader();
+      return true;
   }
   return false;
 }
@@ -2427,13 +2332,9 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
               .first->second;
 }
 
-// Converts a raw 8-bit gamma-encoded byte (a uint scalar) to the midpoint of
-// its linear range. Used when a non-gamma EDRAM value is reinterpreted as
-// k_8_8_8_8_GAMMA for a linear unorm16 host render target. The midpoint, rather
-// than the exact lower edge produced by PWLGammaToLinear, keeps the value
-// safely inside the byte's range across the unorm16 quantization round-trip, so
-// a later linear -> gamma re-encode reproduces the original byte. Mirrors the
-// piecewise constants in the D3D12 render target cache.
+// Decodes raw EDRAM gamma bytes to the midpoint of its linear quantization
+// range. The midpoint survives the UNORM16 round trip and re-encodes to the
+// original bytes.
 static spv::Id GammaByteToLinearMidpoint(SpirvBuilder& builder,
                                          spv::Id byte_uint) {
   spv::Id type_float = builder.makeFloatType(32);
@@ -2484,7 +2385,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
 
   std::vector<spv::Id> id_vector_temp;
   std::vector<unsigned int> uint_vector_temp;
-  SpirvBuilder builder(spirv_version_,
+  SpirvBuilder builder(spv::Spv_1_0,
                        (SpirvShaderTranslator::kSpirvMagicToolId << 16) | 1,
                        nullptr);
   spv::Id ext_inst_glsl_std_450 = builder.import("GLSL.std.450");
@@ -3492,9 +3393,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
         case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
           if (source_color_format ==
               xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
-            // Gamma source stores linear; encode RGB of both 32bpp samples to
-            // gamma bytes before packing into the 64bpp destination. Only
-            // loaded components are converted.
+            // Gamma sources store linear RGB.
+            // Encode loaded components before packing.
             for (uint32_t i = 0; i < 2; ++i) {
               for (uint32_t j = 0; j < 3; ++j) {
                 if (source_color[i][j] == spv::NoResult) {
@@ -3705,10 +3605,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
           } break;
           case xenos::DepthRenderTargetFormat::kD24FS8: {
             depth24 = SpirvShaderTranslator::PreClampedDepthTo20e4(
-                builder, source_depth_float[i],
-                !depth_float24_convert_in_pixel_shader() &&
-                    depth_float24_round(),
-                true, ext_inst_glsl_std_450);
+                builder, source_depth_float[i], depth_float24_round(), true,
+                ext_inst_glsl_std_450);
           } break;
         }
         // Merge depth and stencil.
@@ -3775,21 +3673,17 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
               (dest_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
                dest_color_format ==
                    xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) {
-            // Same byte layout - only a gamma color space conversion on RGB may
-            // be needed. The gamma resource format is stored as linear in the
-            // unorm16 host render target, so convert when exactly one side is
-            // gamma (alpha is never gamma-encoded).
+            // Same layout, but converts RGB when exactly one side is gamma.
+            // Alpha is unchanged.
             id_vector_temp.clear();
             for (uint32_t i = 0; i < 4; ++i) {
               spv::Id component = source_color[0][i];
               if (i < 3 && dest_color_format != source_color_format) {
                 if (dest_color_format ==
                     xenos::ColorRenderTargetFormat::k_8_8_8_8) {
-                  // Gamma source (linear storage) -> plain dest (gamma bytes).
                   component = SpirvShaderTranslator::LinearToPWLGamma(
                       &builder, component, true, ext_inst_glsl_std_450);
                 } else {
-                  // Plain source (gamma bytes) -> gamma dest (linear storage).
                   component = SpirvShaderTranslator::PWLGammaToLinear(
                       &builder, component, true, ext_inst_glsl_std_450);
                 }
@@ -3802,10 +3696,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
           } else {
             if (source_color_format ==
                 xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
-              // Gamma source stores linear; encode RGB to gamma bytes before
-              // packing into the raw 32bpp value reinterpreted by the
-              // differently-formatted destination. Only loaded components are
-              // converted (stencil bit output loads red only).
+              // Gamma sources store linear RGB.
+              // Encode loaded components before packing the raw value.
               for (uint32_t j = 0; j < 3; ++j) {
                 if (source_color[0][j] == spv::NoResult) {
                   continue;
@@ -4019,10 +3911,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
           } break;
           case xenos::DepthRenderTargetFormat::kD24FS8: {
             packed = SpirvShaderTranslator::PreClampedDepthTo20e4(
-                builder, source_depth_float[0],
-                !depth_float24_convert_in_pixel_shader() &&
-                    depth_float24_round(),
-                true, ext_inst_glsl_std_450);
+                builder, source_depth_float[0], depth_float24_round(), true,
+                ext_inst_glsl_std_450);
           } break;
         }
         if (mode.output == TransferOutput::kDepth) {
@@ -4047,45 +3937,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
           switch (dest_color_format) {
             case xenos::ColorRenderTargetFormat::k_8_8_8_8:
             case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
-              // Same-base 7e3 source -> decode the 7e3 floats to [0, 1] instead
-              // of bit-reinterpreting. See IsTransferValueConverted7e3And8888
-              // and the D3D12 TransferConvert7e3To8888.
-              if (key.value_convert && source_is_color &&
-                  (source_color_format ==
-                       xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
-                   source_color_format ==
-                       xenos::ColorRenderTargetFormat::
-                           k_2_10_10_10_FLOAT_AS_16_16_16_16)) {
-                id_vector_temp.clear();
-                for (uint32_t i = 0; i < 3; ++i) {
-                  id_vector_temp.push_back(builder.createTriBuiltinCall(
-                      type_float, ext_inst_glsl_std_450, GLSLstd450NClamp,
-                      SpirvShaderTranslator::Float7e3To32(
-                          builder, packed, 10 * i, false,
-                          ext_inst_glsl_std_450),
-                      builder.makeFloatConstant(0.0f),
-                      builder.makeFloatConstant(1.0f)));
-                }
-                id_vector_temp.push_back(builder.createBinOp(
-                    spv::OpFMul, type_float,
-                    builder.createUnaryOp(
-                        spv::OpConvertUToF, type_float,
-                        builder.createTriOp(spv::OpBitFieldUExtract, type_uint,
-                                            packed,
-                                            builder.makeUintConstant(30),
-                                            builder.makeUintConstant(2))),
-                    builder.makeFloatConstant(1.0f / 3.0f)));
-                builder.createStore(builder.createCompositeConstruct(
-                                        type_fragment_data, id_vector_temp),
-                                    output_fragment_data);
-                break;
-              }
-              // For a gamma destination stored as linear in unorm16, the raw
-              // EDRAM bytes are reinterpreted as gamma and decoded to the
-              // midpoint of each byte's linear range (alpha stays linear). The
-              // midpoint survives the unorm16 round-trip so a later re-encode
-              // reproduces the byte. Reaching the gamma format implies
-              // gamma_render_target_as_unorm16.
+              // Gamma destinations store linear RGB.
+              // Decode raw bytes before writing the image. Alpha stays linear.
               bool is_gamma = dest_color_format ==
                               xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
               spv::Id component_width = builder.makeUintConstant(8);
@@ -4136,30 +3989,6 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
             case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
             case xenos::ColorRenderTargetFormat::
                 k_2_10_10_10_FLOAT_AS_16_16_16_16: {
-              if (key.value_convert && source_is_color &&
-                  source_color_format ==
-                      xenos::ColorRenderTargetFormat::k_8_8_8_8) {
-                // Reverse: 8_8_8_8 source -> unpack the unorm bytes to [0, 1].
-                // Matches the D3D12 TransferConvert8888To7e3.
-                spv::Id component_width = builder.makeUintConstant(8);
-                spv::Id unorm_scale = builder.makeFloatConstant(1.0f / 255.0f);
-                id_vector_temp.clear();
-                for (uint32_t i = 0; i < 4; ++i) {
-                  id_vector_temp.push_back(builder.createBinOp(
-                      spv::OpFMul, type_float,
-                      builder.createUnaryOp(
-                          spv::OpConvertUToF, type_float,
-                          builder.createTriOp(spv::OpBitFieldUExtract,
-                                              type_uint, packed,
-                                              builder.makeUintConstant(8 * i),
-                                              component_width)),
-                      unorm_scale));
-                }
-                builder.createStore(builder.createCompositeConstruct(
-                                        type_fragment_data, id_vector_temp),
-                                    output_fragment_data);
-                break;
-              }
               id_vector_temp.clear();
               // Color.
               spv::Id width_rgb = builder.makeUintConstant(10);
@@ -4562,10 +4391,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
               } break;
               case xenos::DepthRenderTargetFormat::kD24FS8: {
                 host_depth24 = SpirvShaderTranslator::PreClampedDepthTo20e4(
-                    builder, host_depth32,
-                    !depth_float24_convert_in_pixel_shader() &&
-                        depth_float24_round(),
-                    true, ext_inst_glsl_std_450);
+                    builder, host_depth32, depth_float24_round(), true,
+                    ext_inst_glsl_std_450);
               } break;
             }
             assert_true(host_depth24 != spv::NoResult);
@@ -4715,32 +4542,23 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(
                                                     : nullptr;
   }
 
+  VkRenderPass render_pass =
+      GetHostRenderTargetsRenderPass(key.render_pass_key);
+  VkShaderModule fragment_shader_module = GetTransferShader(key.shader_key);
+  if (render_pass == VK_NULL_HANDLE ||
+      fragment_shader_module == VK_NULL_HANDLE) {
+    transfer_pipelines_.emplace(key, std::array<VkPipeline, 4>{});
+    return nullptr;
+  }
+
+  const TransferModeInfo& mode = kTransferModes[size_t(key.shader_key.mode)];
+
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       vulkan_device->properties();
-
-  bool use_dynamic_rendering =
-      cvars::vulkan_dynamic_rendering && device_properties.dynamicRendering;
-
-  VkRenderPass render_pass = VK_NULL_HANDLE;
-  if (!use_dynamic_rendering) {
-    render_pass = GetHostRenderTargetsRenderPass(key.render_pass_key);
-    if (render_pass == VK_NULL_HANDLE) {
-      transfer_pipelines_.emplace(key, std::array<VkPipeline, 4>{});
-      return nullptr;
-    }
-  }
-
-  VkShaderModule fragment_shader_module = GetTransferShader(key.shader_key);
-  if (fragment_shader_module == VK_NULL_HANDLE) {
-    transfer_pipelines_.emplace(key, std::array<VkPipeline, 4>{});
-    return nullptr;
-  }
-
-  const TransferModeInfo& mode = kTransferModes[size_t(key.shader_key.mode)];
 
   uint32_t dest_sample_count = uint32_t(1)
                                << uint32_t(key.shader_key.dest_msaa_samples);
@@ -4916,44 +4734,10 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(
         VK_DYNAMIC_STATE_STENCIL_WRITE_MASK;
   }
 
-  // For VK_KHR_dynamic_rendering: set up VkPipelineRenderingCreateInfo.
-  VkPipelineRenderingCreateInfo pipeline_rendering_create_info = {};
-  VkFormat color_attachment_format = VK_FORMAT_UNDEFINED;
-  VkFormat depth_attachment_format = VK_FORMAT_UNDEFINED;
-  VkFormat stencil_attachment_format = VK_FORMAT_UNDEFINED;
-  if (use_dynamic_rendering) {
-    pipeline_rendering_create_info.sType =
-        VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    pipeline_rendering_create_info.pNext = nullptr;
-    pipeline_rendering_create_info.viewMask = 0;
-
-    // Transfers target a single attachment - either depth or color.
-    if (key.render_pass_key.depth_and_color_used & 0b1) {
-      // Depth attachment.
-      depth_attachment_format =
-          GetDepthVulkanFormat(key.render_pass_key.depth_format);
-      stencil_attachment_format = depth_attachment_format;
-      pipeline_rendering_create_info.colorAttachmentCount = 0;
-      pipeline_rendering_create_info.pColorAttachmentFormats = nullptr;
-    } else {
-      // Color attachment (transfers use transfer formats).
-      color_attachment_format = GetColorOwnershipTransferVulkanFormat(
-          key.render_pass_key.color_0_view_format);
-      pipeline_rendering_create_info.colorAttachmentCount = 1;
-      pipeline_rendering_create_info.pColorAttachmentFormats =
-          &color_attachment_format;
-    }
-    pipeline_rendering_create_info.depthAttachmentFormat =
-        depth_attachment_format;
-    pipeline_rendering_create_info.stencilAttachmentFormat =
-        stencil_attachment_format;
-  }
-
   std::array<VkPipeline, 4> pipelines{};
   VkGraphicsPipelineCreateInfo pipeline_create_info;
   pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  pipeline_create_info.pNext =
-      use_dynamic_rendering ? &pipeline_rendering_create_info : nullptr;
+  pipeline_create_info.pNext = nullptr;
   pipeline_create_info.flags = 0;
   if (dest_is_masked_sample) {
     pipeline_create_info.flags |= VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT;
@@ -5024,31 +4808,16 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     const std::vector<Transfer>* render_target_transfers,
     const uint64_t* render_target_resolve_clear_values,
     const Transfer::Rectangle* resolve_clear_rectangle) {
-  SCOPE_profile_cpu_f("gpu");
   assert_true(GetPath() == Path::kHostRenderTargets);
-
-  bool resolve_clear_needed =
-      render_target_resolve_clear_values && resolve_clear_rectangle;
-
-  // Check if there's any actual work to do before pushing debug marker.
-  bool has_transfers = false;
-  for (uint32_t i = 0; i < render_target_count && !has_transfers; ++i) {
-    if (render_targets[i] &&
-        (!render_target_transfers[i].empty() || resolve_clear_needed)) {
-      has_transfers = true;
-    }
-  }
-  if (!has_transfers) {
-    return;
-  }
-
-  command_processor_.PushDebugMarker("PerformTransfersAndResolveClears");
 
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   uint64_t current_submission = command_processor_.GetCurrentSubmission();
   DeferredCommandBuffer& command_buffer =
       command_processor_.deferred_command_buffer();
+
+  bool resolve_clear_needed =
+      render_target_resolve_clear_values && resolve_clear_rectangle;
   VkClearRect resolve_clear_rect;
   if (resolve_clear_needed) {
     // All render targets of one resolve clear share the pitch and thus the
@@ -5362,11 +5131,6 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     // Don't enter the render pass immediately - may still insert source
     // barriers later.
 
-    // Get the view for dynamic rendering (used for both transfers and clears).
-    VkImageView transfer_dest_view = dest_rt_key.is_depth
-                                         ? dest_vulkan_rt.view_depth_stencil()
-                                         : dest_vulkan_rt.view_color_transfer();
-
     if (!current_transfers.empty()) {
       uint32_t dest_pitch_tiles = dest_rt_key.GetPitchTiles();
       bool dest_is_64bpp = dest_rt_key.Is64bpp();
@@ -5423,8 +5187,6 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
               source_rt_key.msaa_samples;
           new_transfer_shader_key.source_resource_format =
               source_rt_key.resource_format;
-          new_transfer_shader_key.value_convert =
-              IsTransferValueConverted7e3And8888(source_rt_key, dest_rt_key);
           new_transfer_shader_key.source_scale_native =
               source_rt_key.scale_native;
           assert_true(!host_depth_source_vulkan_rt ||
@@ -5527,8 +5289,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       // Perform the transfers for the render target.
 
       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-          transfer_render_pass, transfer_framebuffer, transfer_dest_view,
-          dest_rt_key.is_depth);
+          transfer_render_pass, transfer_framebuffer);
 
       if (stencil_clear_rectangle_count) {
         VkClearAttachment* stencil_clear_attachment;
@@ -5899,8 +5660,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     // Perform the clear.
     if (resolve_clear_needed) {
       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-          transfer_render_pass, transfer_framebuffer, transfer_dest_view,
-          dest_rt_key.is_depth);
+          transfer_render_pass, transfer_framebuffer);
       VkClearAttachment resolve_clear_attachment;
       resolve_clear_attachment.colorAttachment = 0;
       std::memset(&resolve_clear_attachment.clearValue, 0,
@@ -5935,7 +5695,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             }
             if (dest_rt_key.GetColorFormat() ==
                 xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
-              // Stored as linear in the unorm16 host render target.
+              // Gamma clear values are stored linearly in the host target.
               for (uint32_t j = 0; j < 3; ++j) {
                 resolve_clear_attachment.clearValue.color.float32[j] =
                     xenos::PWLGammaToLinear(
@@ -6004,8 +5764,6 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
                                            &resolve_clear_rect);
     }
   }
-
-  command_processor_.PopDebugMarker();
 }
 
 VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
@@ -6016,7 +5774,7 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
 
   std::vector<spv::Id> id_vector_temp;
 
-  SpirvBuilder builder(spirv_version_,
+  SpirvBuilder builder(spv::Spv_1_0,
                        (SpirvShaderTranslator::kSpirvMagicToolId << 16) | 1,
                        nullptr);
   spv::Id ext_inst_glsl_std_450 = builder.import("GLSL.std.450");
@@ -6351,9 +6109,8 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
       } break;
       case xenos::DepthRenderTargetFormat::kD24FS8: {
         packed[0] = SpirvShaderTranslator::PreClampedDepthTo20e4(
-            builder, source_depth32,
-            !depth_float24_convert_in_pixel_shader() && depth_float24_round(),
-            true, ext_inst_glsl_std_450);
+            builder, source_depth32, depth_float24_round(), true,
+            ext_inst_glsl_std_450);
       } break;
     }
     packed[0] = builder.createQuadOp(
@@ -6363,10 +6120,8 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
     switch (key.GetColorFormat()) {
       case xenos::ColorRenderTargetFormat::k_8_8_8_8:
       case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
-        // k_8_8_8_8_GAMMA is stored as linear in the unorm16 host render
-        // target, so encode RGB linear -> gamma before packing (alpha stays
-        // linear). Reaching the gamma resource format implies
-        // gamma_render_target_as_unorm16.
+        // Gamma targets store linear RGB. Encode RGB before packing the dump.
+        // Alpha stays linear.
         bool is_gamma = key.GetColorFormat() ==
                         xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
         spv::Id unorm_round_offset = builder.makeFloatConstant(0.5f);
@@ -6572,9 +6327,6 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     return;
   }
 
-  command_processor_.PushDebugMarker(
-      "DumpRenderTargets (EDRAM Write): base tile %u", dump_base);
-
   // Clear previously set temporary indices.
   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
     static_cast<VulkanRenderTarget*>(rectangle.render_target)
@@ -6718,8 +6470,6 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     }
     MarkEdramBufferModified();
   }
-
-  command_processor_.PopDebugMarker();
 }
 
 }  // namespace vulkan

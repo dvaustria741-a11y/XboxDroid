@@ -2823,9 +2823,7 @@ static inline XReg PrepareLocalBase(A64Emitter& e, uint32_t offset,
     return e.sp;
   }
   e.mov(e.x17, static_cast<uint64_t>(offset));
-  // SP is only encodable as the source operand of the extended-register add,
-  // the plain shifted-register form rejecting register index 31.
-  e.add(e.x17, e.sp, e.x17, UXTX);
+  e.add(e.x17, e.sp, e.x17);
   return e.x17;
 }
 static inline uint32_t PrepareLocalImm(uint32_t offset, uint32_t scale) {

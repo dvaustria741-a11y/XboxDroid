@@ -85,7 +85,6 @@ class UserTracker {
 
   // Titles
   void AddTitleToPlayedList();
-  void AddTitleToPlayedList(uint64_t xuid);
   void RemoveTitleFromPlayedList(uint64_t xuid, uint32_t title_id);
   std::vector<TitleInfo> GetPlayedTitles(uint64_t xuid) const;
   std::optional<TitleInfo> GetUserTitleInfo(uint64_t xuid,
@@ -111,6 +110,7 @@ class UserTracker {
   std::optional<UserSetting> GetGpdSetting(UserProfile* user, uint32_t title_id,
                                            uint32_t setting_id) const;
 
+  void AddTitleToPlayedList(uint64_t xuid);
   void UpdateTitleGpdFile();
   void UpdateProfileGpd();
   void UpdateMissingAchievemntsIcons();
