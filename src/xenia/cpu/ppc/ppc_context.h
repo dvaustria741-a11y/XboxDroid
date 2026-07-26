@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 
+#include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
 #include "xenia/base/vec128.h"
 #include "xenia/guest_pointers.h"
@@ -358,18 +359,18 @@ typedef struct alignas(64) PPCContext_s {
       uint32_t vxisi : 1;   // FP invalid op exception: infinity - infinity
                             // -- sticky
       uint32_t vxsnan : 1;  // FP invalid op exception: SNaN -- sticky
-      uint32_t
-          xx : 1;  // FP inexact exception                             -- sticky
-      uint32_t
-          zx : 1;  // FP zero divide exception                         -- sticky
-      uint32_t
-          ux : 1;  // FP underflow exception                           -- sticky
-      uint32_t
-          ox : 1;  // FP overflow exception                            -- sticky
+      uint32_t xx
+          : 1;  // FP inexact exception                             -- sticky
+      uint32_t zx
+          : 1;  // FP zero divide exception                         -- sticky
+      uint32_t ux
+          : 1;  // FP underflow exception                           -- sticky
+      uint32_t ox
+          : 1;  // FP overflow exception                            -- sticky
       uint32_t vx : 1;   // FP invalid operation exception summary
       uint32_t fex : 1;  // FP enabled exception summary
-      uint32_t
-          fx : 1;  // FP exception summary                             -- sticky
+      uint32_t fx
+          : 1;  // FP exception summary                             -- sticky
     } bits;
   } fpscr;  // Floating-point status and control register
 
@@ -425,8 +426,6 @@ typedef struct alignas(64) PPCContext_s {
 
   uint8_t* physical_membase;
 
-  // Value of last reserved load
-  uint64_t reserved_val;
   ThreadState* thread_state;
   uint8_t* virtual_membase;
 
@@ -437,6 +436,12 @@ typedef struct alignas(64) PPCContext_s {
 #if XE_PLATFORM_WIN32 == 1
     if (guest_address >=
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
+      host_address += 0x1000;
+    }
+#else
+    // Match vE0000000 PhysicalHeap shift (see Memory::TranslateVirtual).
+    if (xe::memory::allocation_granularity() > 0x1000 &&
+        guest_address >= 0xE0000000u) {
       host_address += 0x1000;
     }
 #endif
@@ -465,6 +470,11 @@ typedef struct alignas(64) PPCContext_s {
         reinterpret_cast<const uint8_t*>(host_ptr) - virtual_membase);
 #if XE_PLATFORM_WIN32 == 1
     if (guest_tmp >= static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
+      guest_tmp -= 0x1000;
+    }
+#else
+    if (xe::memory::allocation_granularity() > 0x1000 &&
+        guest_tmp >= 0xE0000000u) {
       guest_tmp -= 0x1000;
     }
 #endif

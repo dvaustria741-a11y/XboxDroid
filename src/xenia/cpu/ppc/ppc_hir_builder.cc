@@ -141,7 +141,10 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
         AnnotateLabel(address, label);
       }
       comment_buffer_.Reset();
-      comment_buffer_.AppendFormat("{:08X} {:08X} ", address, code);
+      comment_buffer_.AppendHexUInt32(address);
+      comment_buffer_.Append(' ');
+      comment_buffer_.AppendHexUInt32(code);
+      comment_buffer_.Append(' ');
       DisasmPPC(address, code, &comment_buffer_);
       Comment(comment_buffer_);
       first_instr = last_instr();
@@ -577,14 +580,6 @@ void PPCHIRBuilder::StoreVR(uint32_t reg, Value* value) {
   trace_reg.value = value;
 }
 
-void PPCHIRBuilder::StoreReserved(Value* val) {
-  assert_true(val->type == INT64_TYPE);
-  StoreContext(offsetof(PPCContext, reserved_val), val);
-}
-
-Value* PPCHIRBuilder::LoadReserved() {
-  return LoadContext(offsetof(PPCContext, reserved_val), INT64_TYPE);
-}
 void PPCHIRBuilder::SetReturnAddress(Value* value) {
   /*
      Record the address as being a possible target of a return. This is
@@ -597,7 +592,9 @@ void PPCHIRBuilder::SetReturnAddress(Value* value) {
       if (xexmod) {
         auto flags = xexmod->GetInstructionAddressFlags(value->AsUint32());
         if (flags) {
-          flags->is_return_site = true;
+          InfoCacheFlags bits{};
+          bits.is_return_site = true;
+          AtomicSetInfoCacheFlags(flags, bits);
         }
       }
     }

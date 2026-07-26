@@ -422,11 +422,11 @@ class RenderTargetCache {
     struct {
       // - 1 because the maximum is 0x1FFF / 8, not 0x2000 / 8.
       uint32_t x_pixels_div_8 : xenos::kResolveSizeBits - 1 -
-                                xenos::kResolveAlignmentPixelsLog2;
+          xenos::kResolveAlignmentPixelsLog2;
       uint32_t y_pixels_div_8 : xenos::kResolveSizeBits - 1 -
-                                xenos::kResolveAlignmentPixelsLog2;
+          xenos::kResolveAlignmentPixelsLog2;
       uint32_t width_pixels_div_8_minus_1 : xenos::kResolveSizeBits - 1 -
-                                            xenos::kResolveAlignmentPixelsLog2;
+          xenos::kResolveAlignmentPixelsLog2;
     };
     HostDepthStoreRectangleConstant() : constant(0) {
       static_assert_size(*this, sizeof(constant));
@@ -633,6 +633,15 @@ class RenderTargetCache {
   // To be called by the implementation when interlocked writes to all of the
   // EDRAM memory are committed with a memory barrier.
   void PixelShaderInterlockFullEdramBarrierPlaced();
+
+  // Whether a 7e3 -> 8_8_8_8 in-place reuse should decode (HDR float to LDR
+  // unorm) instead of bit-reinterpreting. Bit-reinterpret is hardware-accurate,
+  // so decode applies only where the reinterpreted bytes are actually seen: a
+  // matched same-base/pitch/MSAA reuse, 7e3 -> plain 8_8_8_8, whose draw blends
+  // over the dest. Everything else (overwrite, reverse, gamma, cvar off) stays
+  // bit-exact.
+  bool IsTransferValueConverted7e3And8888(RenderTargetKey source,
+                                          RenderTargetKey dest) const;
 
  private:
   const RegisterFile& register_file_;

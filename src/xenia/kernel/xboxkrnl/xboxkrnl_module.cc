@@ -69,18 +69,6 @@ bool XboxkrnlModule::SendPIXCommand(const char* cmd) {
 
 XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
     : KernelModule(kernel_state, "xe:\\xboxkrnl.exe") {
-  // Allocate kernel memory for export global variables. Allocate memory from
-  // 0x80070000 because guest trampoline for kernel, xam and xbdm are allocated
-  // from 0x80040000.
-  auto heap = memory()->LookupHeap(0x80070000);
-  // Allocate remaining memory for kernel
-  uint32_t kernel_range;
-  if (!heap->AllocRange(
-          0x80070000, 0x80280000, 0x200000, 0x1000, kMemoryAllocationCommit,
-          kMemoryProtectRead | kMemoryProtectWrite, false, &kernel_range)) {
-    XELOGW("XboxkrnlModule could not allocate kernel memory!");
-  }
-
   RegisterExportTable(export_resolver_);
 
   // Register all exported functions.
@@ -93,43 +81,46 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
   // Set to a valid value when a remote debugger is attached.
   // Offset 0x18 is a 4b pointer to a handler function that seems to take two
   // arguments. If we wanted to see what would happen we could fake that.
-  const uint32_t KeDebugMonitorData = 0x80207A64;
+  uint32_t pKeDebugMonitorData;
   if (!cvars::kernel_debug_monitor) {
-    auto lpKeDebugMonitorData = memory_->TranslateVirtual(KeDebugMonitorData);
+    pKeDebugMonitorData = memory_->SystemHeapAlloc(4);
+    auto lpKeDebugMonitorData = memory_->TranslateVirtual(pKeDebugMonitorData);
     xe::store_and_swap<uint32_t>(lpKeDebugMonitorData, 0);
   } else {
-    uint32_t pKeDebugMonitorData =
-        memory_->SystemHeapAlloc(sizeof(X_KEDEBUGMONITORDATA));
+    pKeDebugMonitorData =
+        memory_->SystemHeapAlloc(4 + sizeof(X_KEDEBUGMONITORDATA));
     xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(pKeDebugMonitorData),
-                                 pKeDebugMonitorData);
+                                 pKeDebugMonitorData + 4);
     auto lpKeDebugMonitorData =
-        memory_->TranslateVirtual<X_KEDEBUGMONITORDATA*>(pKeDebugMonitorData);
+        memory_->TranslateVirtual<X_KEDEBUGMONITORDATA*>(pKeDebugMonitorData +
+                                                         4);
     std::memset(lpKeDebugMonitorData, 0, sizeof(X_KEDEBUGMONITORDATA));
     lpKeDebugMonitorData->callback_fn =
         GenerateTrampoline("KeDebugMonitorCallback", KeDebugMonitorCallback);
   }
   export_resolver_->SetVariableMapping(
-      "xboxkrnl.exe", ordinals::KeDebugMonitorData, KeDebugMonitorData);
+      "xboxkrnl.exe", ordinals::KeDebugMonitorData, pKeDebugMonitorData);
 
   // KeCertMonitorData (?*)
   // Always set to zero, ignored.
-  const uint32_t KeCertMonitorData = 0x80207A60;
+  uint32_t pKeCertMonitorData;
   if (!cvars::kernel_cert_monitor) {
-    auto lpKeCertMonitorData = memory_->TranslateVirtual(KeCertMonitorData);
+    pKeCertMonitorData = memory_->SystemHeapAlloc(4);
+    auto lpKeCertMonitorData = memory_->TranslateVirtual(pKeCertMonitorData);
     xe::store_and_swap<uint32_t>(lpKeCertMonitorData, 0);
   } else {
-    uint32_t pKeCertMonitorData =
-        memory_->SystemHeapAlloc(sizeof(X_KECERTMONITORDATA));
+    pKeCertMonitorData =
+        memory_->SystemHeapAlloc(4 + sizeof(X_KECERTMONITORDATA));
     xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(pKeCertMonitorData),
-                                 pKeCertMonitorData);
+                                 pKeCertMonitorData + 4);
     auto lpKeCertMonitorData =
-        memory_->TranslateVirtual<X_KECERTMONITORDATA*>(pKeCertMonitorData);
+        memory_->TranslateVirtual<X_KECERTMONITORDATA*>(pKeCertMonitorData + 4);
     std::memset(lpKeCertMonitorData, 0, sizeof(X_KECERTMONITORDATA));
     lpKeCertMonitorData->callback_fn =
         GenerateTrampoline("KeCertMonitorCallback", KeCertMonitorCallback);
   }
   export_resolver_->SetVariableMapping(
-      "xboxkrnl.exe", ordinals::KeCertMonitorData, KeCertMonitorData);
+      "xboxkrnl.exe", ordinals::KeCertMonitorData, pKeCertMonitorData);
 
   // XboxHardwareInfo (XboxHardwareInfo_t, 16b)
   // flags       cpu#  ?     ?     ?     ?           ?       ?
@@ -142,21 +133,21 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
   //
   // From kernel dissasembly, after storage is initialized
   // XboxHardwareInfo flags is set with flag 5 (0x20).
-  const uint32_t XboxHardwareInfo = 0x801D0030;
-  auto lpXboxHardwareInfo = memory_->TranslateVirtual(XboxHardwareInfo);
+  uint32_t pXboxHardwareInfo = memory_->SystemHeapAlloc(16);
+  auto lpXboxHardwareInfo = memory_->TranslateVirtual(pXboxHardwareInfo);
   export_resolver_->SetVariableMapping(
-      "xboxkrnl.exe", ordinals::XboxHardwareInfo, XboxHardwareInfo);
+      "xboxkrnl.exe", ordinals::XboxHardwareInfo, pXboxHardwareInfo);
   xe::store_and_swap<uint32_t>(lpXboxHardwareInfo + 0, 0x20);  // flags
   xe::store_and_swap<uint8_t>(lpXboxHardwareInfo + 4, 0x06);   // cpu count
   // Remaining 11b are zeroes?
 
   // ExConsoleGameRegion, probably same values as keyvault region uses?
   // Just return all 0xFF, should satisfy anything that checks it
-  const uint32_t ExConsoleGameRegion = 0x80205150;
-  auto lpExConsoleGameRegion = memory_->TranslateVirtual(ExConsoleGameRegion);
+  uint32_t pExConsoleGameRegion = memory_->SystemHeapAlloc(4);
+  auto lpExConsoleGameRegion = memory_->TranslateVirtual(pExConsoleGameRegion);
   export_resolver_->SetVariableMapping(
-      "xboxkrnl.exe", ordinals::ExConsoleGameRegion, ExConsoleGameRegion);
-  xe::store<uint16_t>(lpExConsoleGameRegion, 0xFFFF);
+      "xboxkrnl.exe", ordinals::ExConsoleGameRegion, pExConsoleGameRegion);
+  xe::store<uint32_t>(lpExConsoleGameRegion, 0xFFFFFFFF);
 
   // XexExecutableModuleHandle (?**)
   // Games try to dereference this to get a pointer to some module struct.
@@ -167,17 +158,20 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
   // 0x80101000 <- our module structure
   // 0x80101058 <- pointer to xex header
   // 0x80101100 <- xex header base
-  const uint32_t XexExecutableModuleHandle = 0x802080D4;
+  uint32_t ppXexExecutableModuleHandle = memory_->SystemHeapAlloc(4);
   export_resolver_->SetVariableMapping("xboxkrnl.exe",
                                        ordinals::XexExecutableModuleHandle,
-                                       XexExecutableModuleHandle);
+                                       ppXexExecutableModuleHandle);
 
   // ExLoadedImageName (char*)
   // The full path to loaded image/xex including its name.
   // Used usually in custom dashboards (Aurora)
-  uint32_t ExLoadedImageName = 0x80207E60;
+  // Todo(Gliniak): Confirm that official kernel always allocate space for this
+  // variable.
+  uint32_t ppExLoadedImageName =
+      memory_->SystemHeapAlloc(kExLoadedImageNameSize);
   export_resolver_->SetVariableMapping(
-      "xboxkrnl.exe", ordinals::ExLoadedImageName, ExLoadedImageName);
+      "xboxkrnl.exe", ordinals::ExLoadedImageName, ppExLoadedImageName);
 
   // ExLoadedCommandLine (char*)
   // The name of the xex. Not sure this is ever really used on real devices.
@@ -188,13 +182,13 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
   if (cvars::cl.length()) {
     command_line += " " + cvars::cl;
   }
-  const uint32_t command_line_length =
+  uint32_t command_line_length =
       xe::align(static_cast<uint32_t>(command_line.length()) + 1,
                 static_cast<uint32_t>(kExLoadedCommandLineSize));
-  const uint32_t ExLoadedCommandLine = 0x80207C60;
-  auto lpExLoadedCommandLine = memory_->TranslateVirtual(ExLoadedCommandLine);
+  uint32_t pExLoadedCommandLine = memory_->SystemHeapAlloc(command_line_length);
+  auto lpExLoadedCommandLine = memory_->TranslateVirtual(pExLoadedCommandLine);
   export_resolver_->SetVariableMapping(
-      "xboxkrnl.exe", ordinals::ExLoadedCommandLine, ExLoadedCommandLine);
+      "xboxkrnl.exe", ordinals::ExLoadedCommandLine, pExLoadedCommandLine);
   std::memset(lpExLoadedCommandLine, 0, command_line_length);
   std::memcpy(lpExLoadedCommandLine, command_line.c_str(),
               command_line.length());
@@ -202,10 +196,10 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
   // XboxKrnlVersion (8b)
   // Kernel version, looks like 2b.2b.2b.2b.
   // I've only seen games check >=, so we just fake something here.
-  const uint32_t XboxKrnlVersion = 0x8004045C;
-  auto lpXboxKrnlVersion = memory_->TranslateVirtual(XboxKrnlVersion);
+  uint32_t pXboxKrnlVersion = memory_->SystemHeapAlloc(sizeof(KernelVersion));
+  auto lpXboxKrnlVersion = memory_->TranslateVirtual(pXboxKrnlVersion);
   export_resolver_->SetVariableMapping(
-      "xboxkrnl.exe", ordinals::XboxKrnlVersion, XboxKrnlVersion);
+      "xboxkrnl.exe", ordinals::XboxKrnlVersion, pXboxKrnlVersion);
   std::memcpy(lpXboxKrnlVersion, kernel_state_->GetKernelVersion(),
               sizeof(KernelVersion));
 
