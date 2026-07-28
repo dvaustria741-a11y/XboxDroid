@@ -20,6 +20,7 @@
 #include "xenia/cpu/backend/a64/a64_function.h"
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
+#include "xenia/cpu/backend/a64/a64_tracers.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/hir/label.h"
@@ -28,14 +29,6 @@
 
 DECLARE_int64(a64_max_stackpoints);
 DECLARE_bool(a64_enable_host_guest_stack_synchronization);
-
-namespace {
-void TraceFunctionEntry(void* raw_context, uint64_t function_address) {
-  auto ctx = reinterpret_cast<xe::cpu::ppc::PPCContext*>(raw_context);
-  XELOGI("a64 call {:08X} t{}", static_cast<uint32_t>(function_address),
-         ctx->thread_id);
-}
-}  // namespace
 
 namespace xe {
 namespace cpu {
@@ -71,7 +64,7 @@ const uint32_t A64Emitter::vec_reg_map_[VEC_COUNT] = {
 };
 
 A64Emitter::A64Emitter(A64Backend* backend, XbyakA64Allocator* allocator)
-    : CodeGenerator(kMaxCodeSize, Xbyak_aarch64::DontSetProtectRWE, allocator),
+    : CodeGenerator(kMaxCodeSize, Xbyak_aarch64::AutoGrow, allocator),
       processor_(backend->processor()),
       backend_(backend),
       code_cache_(backend->code_cache()),
@@ -100,9 +93,20 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   tail_code_.clear();
   fpcr_mode_ = FPCRMode::Unknown;
 
-  // Try to emit.
+  // The prolog, epilog and helpers emit outside the per-opcode guard below, so
+  // an unencodable operand needs catching here too.
   EmitFunctionInfo func_info = {};
-  if (!Emit(builder, func_info)) {
+  bool emitted = false;
+  try {
+    emitted = Emit(builder, func_info);
+  } catch (const Xbyak_aarch64::Error& e) {
+    XELOGE("A64: assembler error while emitting guest function {:08X}: {}",
+           current_guest_function_, e.what());
+    emitted = false;
+  }
+  if (!emitted) {
+    // Emplace only runs on success, so a failed compile has to reset too.
+    ResetPerFunctionState();
     return false;
   }
 
@@ -169,20 +173,20 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // Store zero for call return address (we haven't made a call yet).
   str(xzr, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
 
-  // Record stackpoint for longjmp recovery, then save the resulting depth
-  // for post-call detection (if depth changes, a longjmp skipped frames).
+  // Record stackpoint for longjmp recovery.
   PushStackpoint();
-  if (cvars::a64_enable_host_guest_stack_synchronization) {
-    ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
-                          A64BackendContext, current_stackpoint_depth))));
-    str(w16, ptr(sp, static_cast<uint32_t>(
-                         StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
-  }
 
   // ========================================================================
   // BODY
   // ========================================================================
   code_offsets.body = getSize();
+
+  // FTrace: log guest function entry when the backend was built with
+  // function tracing available (gated at runtime by the trace_func flag).
+  if (IsTracingFunc()) {
+    mov(x1, static_cast<uint64_t>(current_guest_function_));
+    CallNative(reinterpret_cast<void*>(TraceFunctionEntry));
+  }
 
   // Allocate the epilog label (owned by label_cache_ for cleanup).
   auto epilog_label_ptr = new Label();
@@ -217,7 +221,20 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
         }
       }
       const hir::Instr* new_tail = instr;
-      if (!SelectSequence(this, instr, &new_tail)) {
+      bool selected = false;
+      try {
+        selected = SelectSequence(this, instr, &new_tail);
+      } catch (const Xbyak_aarch64::Error& e) {
+        // Uncaught this aborts the process with no context, so name the opcode
+        // and the guest function and fail just this compile.
+        XELOGE(
+            "A64: assembler rejected HIR opcode {} in guest function {:08X}: "
+            "{}",
+            hir::GetOpcodeName(instr->GetOpcodeInfo()), current_guest_function_,
+            e.what());
+        return false;
+      }
+      if (!selected) {
         // No sequence matched — this is expected in Phase 1 before
         // sequences are implemented.
         XELOGE("A64: Unable to process HIR opcode {}",
@@ -235,6 +252,11 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // ========================================================================
   L(*epilog_label_);
   epilog_label_ = nullptr;
+  // FTrace: log the guest return value (r3) on normal return.
+  if (IsTracingFunc()) {
+    mov(x1, static_cast<uint64_t>(current_guest_function_));
+    CallNative(reinterpret_cast<void*>(TraceFunctionReturn));
+  }
   code_offsets.epilog = getSize();
 
   // Pop stackpoint before leaving.
@@ -257,7 +279,13 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     // ARM64 instructions are always 4-byte aligned, so alignment is mostly
     // a no-op unless we want cache-line alignment for hot paths.
     L(tail_item.label);
-    tail_item.func(*this, tail_item.label);
+    try {
+      tail_item.func(*this, tail_item.label);
+    } catch (const Xbyak_aarch64::Error& e) {
+      XELOGE("A64: assembler rejected tail code in guest function {:08X}: {}",
+             current_guest_function_, e.what());
+      return false;
+    }
   }
   code_offsets.tail = getSize();
 
@@ -295,22 +323,28 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
   // In xbyak_aarch64, labels are resolved at define time (backpatching),
   // so all relative offsets are already correct. We just need to reset
   // the codegen state for the next function.
+  ResetPerFunctionState();
+
+  return new_execute_address;
+}
+
+void A64Emitter::ResetPerFunctionState() {
   reset();
   tail_code_.clear();
 
   // Clean up cached labels.
+  epilog_label_ = nullptr;
   for (auto* cached_label : label_cache_) {
     delete cached_label;
   }
   label_cache_.clear();
 
-  // Clean up HIR->xbyak label map.
+  // Clean up HIR->xbyak label map. HIR label ids restart at each function, so
+  // stale entries would hand the next function this one's labels.
   for (auto& pair : label_map_) {
     delete pair.second;
   }
   label_map_.clear();
-
-  return new_execute_address;
 }
 
 void A64Emitter::MarkSourceOffset(const hir::Instr* i) {
@@ -323,6 +357,78 @@ void A64Emitter::MarkSourceOffset(const hir::Instr* i) {
 void A64Emitter::DebugBreak() { brk(0xF000); }
 
 void A64Emitter::Trap(uint16_t trap_type) { brk(trap_type); }
+
+void A64Emitter::b(const Xbyak_aarch64::Cond cond,
+                   const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::b(static_cast<Xbyak_aarch64::Cond>(cond ^ 1), skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
+
+void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
+                     const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::cbnz(rt, skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
+
+void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
+                     const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::cbnz(rt, skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
+
+void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
+                      const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::cbz(rt, skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
+
+void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
+                      const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::cbz(rt, skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
+
+void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
+                     const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::tbnz(rt, imm, skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
+
+void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
+                     const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::tbnz(rt, imm, skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
+
+void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
+                      const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::tbz(rt, imm, skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
+
+void A64Emitter::tbnz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
+                      const Xbyak_aarch64::Label& label) {
+  Xbyak_aarch64::Label skip;
+  CodeGenerator::tbz(rt, imm, skip);
+  CodeGenerator::b(label);
+  L(skip);
+}
 
 void A64Emitter::UnimplementedInstr(const hir::Instr* i) {
   XELOGE("A64: Unimplemented HIR instruction: {}",
@@ -360,11 +466,39 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   }
 
   if (code_cache_->has_indirection_table()) {
-    // Load host code address from indirection table.
+    // Must leave the guest address in w16 for the resolve thunk to read.
     mov(w16, function->address());
-    ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
+    if (!code_cache_->encoded_indirection()) {
+      // Fast path: table mapped at host VA == guest addr; slot holds raw
+      // 32-bit host target.
+      ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
+    } else {
+      // Encoded path: see A64CodeCache for the entry format.
+      Label external_target;
+      Label indirection_ready;
+
+      mov(x14, code_cache_->indirection_table_base_bias());
+      add(x14, x14, w16, UXTW);
+      ldr(w9, ptr(x14, static_cast<uint32_t>(0)));
+      tbnz(w9, 31, external_target);
+
+      // Internal: rel32 from code cache base.
+      mov(x14, code_cache_->execute_base_address());
+      add(x9, x14, w9, UXTW);
+      b(indirection_ready);
+
+      // External: tagged index into the side table.
+      L(external_target);
+      and_(w15, w9, A64CodeCache::kIndirectionExternalIndexMask);
+      mov(x14, code_cache_->external_indirection_table_base_address());
+      lsl(x15, x15, 3);
+      add(x14, x14, x15);
+      ldr(x9, ptr(x14, static_cast<uint32_t>(0)));
+
+      L(indirection_ready);
+    }
   } else {
-    // Fallback: resolve at runtime.
+    // No indirection table: resolve at runtime.
     mov(x0, x20);  // context
     mov(x1, static_cast<uint64_t>(function->address()));
     mov(x9, reinterpret_cast<uint64_t>(&ResolveFunction));
@@ -404,11 +538,41 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
 
   // Load host code address from indirection table.
   if (code_cache_->has_indirection_table()) {
-    mov(w16, target_w);  // w16 = guest address (also used by resolve thunk)
-    ldr(w9, ptr(x16, static_cast<uint32_t>(
-                         0)));  // w9 = host code from indirection table
+    // Must leave the guest address in w16 for the resolve thunk to read.
+    if (target_w.getIdx() != w16.getIdx()) {
+      mov(w16, target_w);
+    }
+    if (!code_cache_->encoded_indirection()) {
+      // Fast path: table mapped at host VA == guest addr; slot holds raw
+      // 32-bit host target.
+      ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
+    } else {
+      // Encoded path: see A64CodeCache for the entry format.
+      Label external_target;
+      Label indirection_ready;
+
+      mov(x14, code_cache_->indirection_table_base_bias());
+      add(x14, x14, w16, UXTW);
+      ldr(w9, ptr(x14, static_cast<uint32_t>(0)));
+      tbnz(w9, 31, external_target);
+
+      // Internal: rel32 from code cache base.
+      mov(x14, code_cache_->execute_base_address());
+      add(x9, x14, w9, UXTW);
+      b(indirection_ready);
+
+      // External: tagged index into the side table.
+      L(external_target);
+      and_(w15, w9, A64CodeCache::kIndirectionExternalIndexMask);
+      mov(x14, code_cache_->external_indirection_table_base_address());
+      lsl(x15, x15, 3);
+      add(x14, x14, x15);
+      ldr(x9, ptr(x14, static_cast<uint32_t>(0)));
+
+      L(indirection_ready);
+    }
   } else {
-    // Fallback: resolve at runtime.
+    // No indirection table: resolve at runtime.
     mov(w16, target_w);
     mov(x0, x20);  // context
     mov(x1, x16);  // guest address
@@ -527,6 +691,63 @@ Label& A64Emitter::NewCachedLabel() {
   return *label;
 }
 
+uint32_t A64Emitter::MapReg(const hir::Value* v, const uint32_t* map, int count,
+                            const char* set_name) {
+  // reg.index is a signed int32 and is -1 while unassigned, so the unsigned
+  // compare catches both "never allocated" and "past the end of the set".
+  const uint32_t index = static_cast<uint32_t>(v->reg.index);
+  if (index >= static_cast<uint32_t>(count)) {
+    XELOGE(
+        "A64: value v{} (type {}, def opcode {}) has no {} register assignment "
+        "(index {} of {}); codegen would emit a bogus register",
+        v->ordinal, static_cast<uint32_t>(v->type),
+        v->def ? hir::GetOpcodeName(v->def->GetOpcodeInfo()) : "<none>",
+        set_name, index, count);
+    assert_always("register allocation missed a value");
+    // Clamp so the assembler still produces a decodable instruction.
+    return map[0];
+  }
+  return map[index];
+}
+
+void A64Emitter::EmitPreemptCheck() {
+  // Only safe at a block head, where the per-block register allocator leaves no
+  // guest value live and ForgetFpcrMode has already run, so the unannounced
+  // guest->host call cannot lose a register or desync the mode tracking.
+  //
+  // The deadline is only tested every 256 block entries, counted in the high
+  // byte of the backend flags, which a byte increment never carries out of.
+  Label& after = NewCachedLabel();
+  const uint32_t counter_offset =
+      static_cast<uint32_t>(offsetof(A64BackendContext, flags) + 3);
+  ldrb(w8, ptr(x19, counter_offset));
+  add(w8, w8, 1);
+  strb(w8, ptr(x19, counter_offset));
+  and_(w8, w8, 0xFF);
+  cbnz(w8, after);
+
+  // Cold path.
+  Label& do_yield = AddToTail([&after](A64Emitter& e, Label&) {
+    // Null until the scheduler starts, and a stale expired deadline can reach
+    // here after it shuts down, so check before calling.
+    e.mov(e.x0,
+          reinterpret_cast<uint64_t>(&xe::cpu::backend::preempt_yield_handler));
+    e.ldr(e.x0, ptr(e.x0));
+    e.cbz(e.x0, after);
+    e.mov(e.x9, reinterpret_cast<uint64_t>(e.backend()->guest_to_host_thunk()));
+    e.blr(e.x9);
+    e.b(after);
+  });
+
+  // CNTVCT_EL0, the same counter Clock::host_tick_count_raw reads.
+  mrs(x9, 3, 3, 14, 0, 2);
+  ldr(x10, ptr(x20, static_cast<int32_t>(
+                        offsetof(ppc::PPCContext, quantum_deadline))));
+  cmp(x9, x10);
+  b(HS, do_yield);
+  L(after);
+}
+
 Label& A64Emitter::GetLabel(uint32_t label_id) {
   auto it = label_map_.find(label_id);
   if (it != label_map_.end()) {
@@ -605,28 +826,26 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
   if (!cvars::a64_enable_host_guest_stack_synchronization) {
     return;
   }
-  // Compare current stackpoint depth against the value saved after
-  // PushStackpoint in the prolog. If different, a longjmp occurred and
-  // some frames' PopStackpoint never ran.
+  // ResolveFunction marks this when it returns a return-site address inside an
+  // existing frame. The marker lives in backend context because native SP can
+  // still point at a skipped frame here.
   auto& return_from_sync = NewCachedLabel();
 
-  ldr(w17, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
-                                                   current_stackpoint_depth))));
-  ldr(w16, ptr(sp, static_cast<uint32_t>(
-                       StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
-  cmp(w17, w16);
+  ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
+                        A64BackendContext, pending_stackpoint_sync_depth))));
+  cbz(w16, return_from_sync);
 
-  auto& sync_label = AddToTail([&return_from_sync](A64Emitter& e, Label& lbl) {
-    // Set up arguments for the sync helper:
+  auto& sync_label = AddToTail([](A64Emitter& e, Label& lbl) {
+    // x8 was set up in the body to point at return_from_sync; do that there
+    // instead of here because adr's ±1 MiB range can't span body+tail in
+    // large functions.
     //   x8 = return address (where to resume after fixup)
-    //   x9 = this function's stack size
-    e.adr(e.x8, return_from_sync);
-    e.mov(e.x9, static_cast<uint64_t>(e.stack_size()));
     e.mov(e.x10, reinterpret_cast<uint64_t>(
                      e.backend()->synchronize_guest_and_host_stack_helper()));
     e.br(e.x10);
   });
-  b(NE, sync_label);
+  adr(x8, return_from_sync);
+  b(sync_label);
 
   L(return_from_sync);
 }

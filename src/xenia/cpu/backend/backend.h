@@ -11,6 +11,7 @@
 #define XENIA_CPU_BACKEND_BACKEND_H_
 
 #include <memory>
+#include <string>
 
 #include "xenia/cpu/backend/machine_info.h"
 #include "xenia/cpu/thread_debug_info.h"
@@ -49,6 +50,8 @@ class Backend {
   Processor* processor() const { return processor_; }
   const MachineInfo* machine_info() const { return &machine_info_; }
   CodeCache* code_cache() const { return code_cache_; }
+
+  virtual std::string name() const { return "unknown"; }
 
   virtual bool Initialize(Processor* processor);
 
@@ -119,6 +122,29 @@ class Backend {
   }
   virtual void FreeGuestTrampoline(uint32_t trampoline_addr) {}
 
+  // lwarx/stwcx. for host code, on the same reservation state the JIT uses, so
+  // a host store cancels a guest thread's reservation. Values are guest endian.
+  // Defaults are a plain access, for backends that never run guest code.
+  virtual uint32_t ReservedLoad32(ppc::PPCContext* context, uint32_t address);
+  virtual uint64_t ReservedLoad64(ppc::PPCContext* context, uint32_t address);
+  virtual bool ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                               uint32_t value);
+  virtual bool ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                               uint64_t value);
+
+  // JIT tracing runtime controls. "available" reflects whether the trace hooks
+  // were compiled into emitted code (XENIA_ENABLE_ITRACE / XENIA_ENABLE_DTRACE
+  // build options); when unavailable the enable flags have no effect.
+  virtual bool trace_instr_available() const { return false; }
+  virtual bool trace_data_available() const { return false; }
+  virtual bool trace_func_available() const { return false; }
+  virtual bool trace_instr_enabled() const { return false; }
+  virtual void set_trace_instr_enabled(bool value) {}
+  virtual bool trace_data_enabled() const { return false; }
+  virtual void set_trace_data_enabled(bool value) {}
+  virtual bool trace_func_enabled() const { return false; }
+  virtual void set_trace_func_enabled(bool value) {}
+
  protected:
   Processor* processor_ = nullptr;
   MachineInfo machine_info_;
@@ -161,6 +187,10 @@ struct GuestTrampolineGroup
     return _NewTrampoline(proc, false);
   }
 };
+
+// Registered by the cooperative scheduler when it starts, null otherwise. A JIT
+// safepoint calls it with the PPCContext once a fiber's timeslice has expired.
+extern void (*preempt_yield_handler)(void* raw_context);
 
 }  // namespace backend
 }  // namespace cpu

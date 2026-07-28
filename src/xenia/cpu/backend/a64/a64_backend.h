@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_BACKEND_A64_A64_BACKEND_H_
 #define XENIA_CPU_BACKEND_A64_A64_BACKEND_H_
 
+#include <atomic>
 #include <memory>
 
 #include "xenia/base/bit_map.h"
@@ -38,14 +39,21 @@ static constexpr uint32_t GUEST_TRAMPOLINE_MIN_LEN = 8;
 static constexpr uint32_t MAX_GUEST_TRAMPOLINES =
     (GUEST_TRAMPOLINE_END - GUEST_TRAMPOLINE_BASE) / GUEST_TRAMPOLINE_MIN_LEN;
 
-#define A64_RESERVE_BLOCK_SHIFT 16
-#define A64_RESERVE_NUM_ENTRIES \
-  ((1024ULL * 1024ULL * 1024ULL * 4ULL) >> A64_RESERVE_BLOCK_SHIFT)
+// Xenon reservation granule is one 128 byte cache line.
+static constexpr uint32_t A64_RESERVE_GRANULE_SHIFT = 7;
+// A generation counter per granule, hashed. stwcx. bumps its granule to kill
+// other threads' reservations. Colliding granules only cost a spurious failure.
+static constexpr uint32_t A64_RESERVE_NUM_ENTRIES = 1u << 20;
+static constexpr uint32_t A64_RESERVE_ENTRY_MASK = A64_RESERVE_NUM_ENTRIES - 1;
 
 struct ReserveHelper {
-  uint64_t blocks[A64_RESERVE_NUM_ENTRIES / 64];
+  std::atomic<uint32_t> generations[A64_RESERVE_NUM_ENTRIES];
 
-  ReserveHelper() { memset(blocks, 0, sizeof(blocks)); }
+  ReserveHelper() {
+    for (auto& generation : generations) {
+      generation.store(0, std::memory_order_relaxed);
+    }
+  }
 };
 
 struct A64BackendStackpoint {
@@ -53,6 +61,9 @@ struct A64BackendStackpoint {
   unsigned guest_stack_;
   unsigned guest_return_address_;
 };
+
+uint32_t FindStackpointSyncDepth(const A64BackendStackpoint* stackpoints,
+                                 uint32_t current_depth, uint32_t guest_sp);
 
 enum : uint32_t {
   kA64BackendFPCRModeBit = 0,
@@ -75,9 +86,11 @@ struct A64BackendContext {
   uint64_t cached_reserve_value_;
   uint64_t* guest_tick_count;
   A64BackendStackpoint* stackpoints;
-  uint64_t cached_reserve_offset;
-  uint32_t cached_reserve_bit;
+  // address of the live reservation, and its granule generation when taken
+  uint32_t reserve_address;
+  uint32_t reserve_generation;
   unsigned int current_stackpoint_depth;
+  unsigned int pending_stackpoint_sync_depth;
   unsigned int fpcr_fpu;
   unsigned int fpcr_vmx;
   // bit 0 = 0 if fpcr is fpu, else it is vmx
@@ -100,6 +113,8 @@ class A64Backend : public Backend {
 
   A64CodeCache* code_cache() const { return code_cache_.get(); }
   uintptr_t emitter_data() const { return emitter_data_; }
+
+  std::string name() const override { return "a64"; }
 
   HostToGuestThunk host_to_guest_thunk() const { return host_to_guest_thunk_; }
   GuestToHostThunk guest_to_host_thunk() const { return guest_to_host_thunk_; }
@@ -140,6 +155,23 @@ class A64Backend : public Backend {
   void SetGuestRoundingMode(void* ctx, unsigned int mode) override;
   bool PopulatePseudoStacktrace(GuestPseudoStackTrace* st) override;
 
+  uint32_t ReservedLoad32(ppc::PPCContext* context, uint32_t address) override;
+  uint64_t ReservedLoad64(ppc::PPCContext* context, uint32_t address) override;
+  bool ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                       uint32_t value) override;
+  bool ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                       uint64_t value) override;
+
+  bool trace_instr_available() const override;
+  bool trace_data_available() const override;
+  bool trace_func_available() const override;
+  bool trace_instr_enabled() const override;
+  void set_trace_instr_enabled(bool value) override;
+  bool trace_data_enabled() const override;
+  void set_trace_data_enabled(bool value) override;
+  bool trace_func_enabled() const override;
+  void set_trace_func_enabled(bool value) override;
+
   void RecordMMIOExceptionForGuestInstruction(void* host_address);
 
  private:
@@ -165,6 +197,7 @@ class A64Backend : public Backend {
   alignas(64) ReserveHelper reserve_helper_;
   BitMap guest_trampoline_address_bitmap_;
   uint8_t* guest_trampoline_memory_ = nullptr;
+  bool guest_trampolines_sub4gb_ = false;
 };
 
 }  // namespace a64

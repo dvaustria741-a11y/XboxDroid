@@ -151,7 +151,6 @@ enum XmmConst {
   XMMInt127,
   XMM2To32,
   XMMFloatInf,
-  XMMDoubleInf,
   XMMIntsToBytes,
   XMMShortsToBytes,
   XMMLVSLTableBase,
@@ -171,8 +170,6 @@ enum XmmConst {
   XMMXOPDwordShiftMask,
   XMMLVLShuffle,
   XMMLVRCmp16,
-  XMMSTVLShuffle,
-  XMMSTVRSwapMask,  // swapwordmask with bit 7 set
   XMMVSRShlByteshuf,
   XMMVSRMask,
   XMMVRsqrteTableStart,
@@ -223,7 +220,9 @@ class X64Emitter : public Xbyak::CodeGenerator {
 
  public:
   // Reserved:  rsp, rsi, rdi
-  // Scratch:   rax/rcx/rdx
+  // Scratch:   rax/rcx/rdx, r8/r9
+  //            rdx doubles as the call-site carrier for the resolve-thunk
+  //            guest address (see Call/CallIndirect emission).
   //            xmm0-2
   // Available: rbx, r10-r15
   //            xmm4-xmm15 (save to get xmm3)
@@ -304,6 +303,10 @@ class X64Emitter : public Xbyak::CodeGenerator {
 
   Xbyak::Label& AddToTail(TailEmitCallback callback, uint32_t alignment = 0);
   Xbyak::Label& NewCachedLabel();
+
+  // Emits a cooperative-scheduler preemption safepoint. Throttled to every
+  // 256th block, it yields the fiber once its timeslice deadline has passed.
+  void EmitPreemptCheck();
 
   void PushStackpoint();
   void PopStackpoint();

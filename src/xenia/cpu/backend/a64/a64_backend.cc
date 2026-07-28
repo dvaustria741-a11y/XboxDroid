@@ -12,6 +12,9 @@
 #include <cstddef>
 #include <cstring>
 
+#include "xenia/base/assert.h"
+#include "xenia/base/atomic.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
@@ -23,12 +26,16 @@
 #if XE_ARCH_ARM64 && XE_COMPILER_MSVC
 #include <intrin.h>
 #endif
+#if XE_PLATFORM_MAC
+#include <pthread.h>
+#endif
 #include "xenia/cpu/backend/a64/a64_assembler.h"
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_function.h"
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
+#include "xenia/cpu/backend/a64/a64_tracers.h"
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
@@ -53,6 +60,26 @@ namespace a64 {
 // Resolve a guest function at runtime. Called by the resolve thunk when
 // a guest address has not yet been compiled.
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address);
+
+uint32_t FindStackpointSyncDepth(const A64BackendStackpoint* stackpoints,
+                                 uint32_t current_depth, uint32_t guest_sp) {
+  if (!stackpoints || current_depth == 0) {
+    return 0;
+  }
+
+  uint32_t idx = current_depth - 1;
+  uint32_t frames_skipped = 0;
+  while (idx != 0xFFFFFFFFu && guest_sp > stackpoints[idx].guest_stack_) {
+    --idx;
+    ++frames_skipped;
+  }
+
+  // >1 frames skipped = real longjmp, not an early SP restore.
+  if (idx == 0xFFFFFFFFu || frames_skipped <= 1) {
+    return 0;
+  }
+  return idx + 1;
+}
 
 // ==========================================================================
 // A64HelperEmitter — generates thunks using xbyak_aarch64.
@@ -375,15 +402,12 @@ ResolveFunctionThunk A64HelperEmitter::EmitResolveFunctionThunk() {
 // --------------------------------------------------------------------------
 // GuestAndHostSynchronizeStackHelper
 // --------------------------------------------------------------------------
-// Called when longjmp is detected (guest r1 changed after a call returned).
-// Walks the stackpoint array backward to find the matching host SP, restores
-// it, and jumps back to the caller.
+// Called when ResolveFunction detected a longjmp return-site reentry. Restores
+// the host SP for the existing frame and jumps back to the caller.
 //
 // On entry (set by the tail-emitted sync check in the guest function):
 //   x8  = return address (where to jump after fixup)
-//   x9  = caller's stack size (to subtract from restored SP)
 //   x19 = A64BackendContext*
-//   x20 = PPCContext*
 void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   using namespace Xbyak_aarch64;
   struct {
@@ -407,47 +431,30 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   ldr(w11, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
                                                    current_stackpoint_depth))));
 
-  // w12 = current guest r1
-  ldr(w12, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
-
-  // Search backward through stackpoints for the first entry where
-  // guest_stack_ >= current r1 (guest stack was unwound past that frame).
-  // ecx = loop index, starting at depth - 1
-  sub(w13, w11, 1);
-
-  auto& loop = NewCachedLabel();
-  auto& found = NewCachedLabel();
+  // w13 = target depth computed by ResolveFunction.
+  ldr(w13, ptr(x19, static_cast<uint32_t>(offsetof(
+                        A64BackendContext, pending_stackpoint_sync_depth))));
   auto& underflow = NewCachedLabel();
 
-  L(loop);
-  // Bounds check
-  tbnz(w13, 31, underflow);  // if index went negative, bail
+  cbz(x10, underflow);
+  // A zero target means this helper was called without a pending repair.
+  cbz(w13, underflow);
+  // The pending target must not be deeper than the current live depth.
+  cmp(w13, w11);
+  b(HI, underflow);
 
-  // x14 = &stackpoints[w13] = x10 + w13 * sizeof(A64BackendStackpoint)
+  // x14 = &stackpoints[target_depth - 1]
+  sub(w13, w13, 1);
+
   mov(w14, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
   umull(x14, w13, w14);
   add(x14, x10, x14);
 
-  // w15 = stackpoints[index].guest_stack_
-  ldr(w15, ptr(x14, static_cast<uint32_t>(
-                        offsetof(A64BackendStackpoint, guest_stack_))));
-
-  // If guest_stack_ >= current r1, we found our target frame.
-  cmp(w15, w12);
-  b(GE, found);
-
-  // Not found yet, go to previous entry.
-  sub(w13, w13, 1);
-  b(loop);
-
-  L(found);
-  // x14 points to the matching stackpoint entry.
-  // Restore host SP from stackpoints[index].host_stack_
+  // Restore host SP from stackpoints[index].host_stack_. A64 stackpoints are
+  // recorded after the function frame allocation, so this is already the SP
+  // expected by the return-site code.
   ldr(x16, ptr(x14, static_cast<uint32_t>(
                         offsetof(A64BackendStackpoint, host_stack_))));
-
-  // Adjust for the caller's stack frame: SP = host_stack_ - stack_size
-  sub(x16, x16, x9);
   mov(sp, x16);
 
   // Update current_stackpoint_depth = index + 1
@@ -455,6 +462,9 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   add(w13, w13, 1);
   str(w13, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
                                                    current_stackpoint_depth))));
+  mov(w15, 0);
+  str(w15, ptr(x19, static_cast<uint32_t>(offsetof(
+                        A64BackendContext, pending_stackpoint_sync_depth))));
 
   // Jump back to the caller.
   br(x8);
@@ -480,12 +490,176 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
 }
 
 // ==========================================================================
+// Reservation helpers. A global per-granule generation counter so
+// cross-thread stores invalidate other threads' reservations. A CAS on the
+// value alone would be ABA-vulnerable.
+// ==========================================================================
+namespace {
+
+A64BackendContext* BackendContextFromRawContext(void* raw_context) {
+  return reinterpret_cast<A64BackendContext*>(
+      reinterpret_cast<uint8_t*>(raw_context) - sizeof(A64BackendContext));
+}
+
+std::atomic<uint32_t>& ReserveGranule(ReserveHelper* reserve_helper,
+                                      uint32_t guest_address) {
+  const uint32_t granule = guest_address >> A64_RESERVE_GRANULE_SHIFT;
+  return reserve_helper->generations[granule & A64_RESERVE_ENTRY_MASK];
+}
+
+extern "C" uint64_t TryAcquireReservationHelper(void* raw_context,
+                                                uint64_t guest_address) {
+  auto* bctx = BackendContextFromRawContext(raw_context);
+  auto& granule =
+      ReserveGranule(bctx->reserve_helper_, uint32_t(guest_address));
+  // snapshot the generation first, the acquire pins the value read after
+  bctx->reserve_generation = granule.load(std::memory_order_acquire);
+  bctx->reserve_address = uint32_t(guest_address);
+  // lwarx replaces any reservation this thread already held
+  bctx->flags |= 1u << kA64BackendHasReserveBit;
+  return 1;
+}
+
+template <typename T>
+T ReservedLoadImpl(ppc::PPCContext* context, uint32_t address) {
+  T* host_address = context->TranslateVirtual<T*>(address);
+  TryAcquireReservationHelper(context, address);
+  auto* bctx = BackendContextFromRawContext(context);
+  const T raw = *host_address;
+  bctx->cached_reserve_value_ = static_cast<uint64_t>(raw);
+  return xe::byte_swap(raw);
+}
+
+template <typename T>
+uint64_t ReservedStoreImpl(void* raw_context, uint64_t guest_address,
+                           uint64_t host_address, uint64_t value) {
+  auto* bctx = BackendContextFromRawContext(raw_context);
+  const uint32_t reserve_flag = 1u << kA64BackendHasReserveBit;
+  const bool had_reservation = (bctx->flags & reserve_flag) != 0;
+  // stwcx. always clears the reservation, stored or not
+  bctx->flags &= ~reserve_flag;
+  // the reservation must be for the address we're storing to
+  if (!had_reservation || bctx->reserve_address != uint32_t(guest_address)) {
+    return 0;
+  }
+
+  auto& granule =
+      ReserveGranule(bctx->reserve_helper_, uint32_t(guest_address));
+  // a store to this granule since our lwarx kills the reservation
+  if (granule.load(std::memory_order_acquire) != bctx->reserve_generation) {
+    return 0;
+  }
+
+  bool exchange_ok;
+  if constexpr (sizeof(T) == sizeof(uint64_t)) {
+    exchange_ok = xe::atomic_cas(
+        bctx->cached_reserve_value_, uint64_t(value),
+        reinterpret_cast<volatile uint64_t*>(uintptr_t(host_address)));
+  } else {
+    exchange_ok = xe::atomic_cas(
+        uint32_t(bctx->cached_reserve_value_), uint32_t(value),
+        reinterpret_cast<volatile uint32_t*>(uintptr_t(host_address)));
+  }
+
+  if (exchange_ok) {
+    // the store landed, so kill other reservations on this granule
+    granule.fetch_add(1, std::memory_order_release);
+  }
+  return exchange_ok ? 1 : 0;
+}
+
+extern "C" uint64_t ReservedStore32Helper(void* raw_context,
+                                          uint64_t guest_address,
+                                          uint64_t host_address,
+                                          uint64_t value) {
+  return ReservedStoreImpl<uint32_t>(raw_context, guest_address, host_address,
+                                     value);
+}
+
+extern "C" uint64_t ReservedStore64Helper(void* raw_context,
+                                          uint64_t guest_address,
+                                          uint64_t host_address,
+                                          uint64_t value) {
+  return ReservedStoreImpl<uint64_t>(raw_context, guest_address, host_address,
+                                     value);
+}
+
+}  // namespace
+
+uint32_t A64Backend::ReservedLoad32(ppc::PPCContext* context,
+                                    uint32_t address) {
+  return ReservedLoadImpl<uint32_t>(context, address);
+}
+
+uint64_t A64Backend::ReservedLoad64(ppc::PPCContext* context,
+                                    uint32_t address) {
+  return ReservedLoadImpl<uint64_t>(context, address);
+}
+
+bool A64Backend::ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                                 uint32_t value) {
+  return ReservedStoreImpl<uint32_t>(
+             context, address,
+             reinterpret_cast<uint64_t>(
+                 context->TranslateVirtual<uint32_t*>(address)),
+             xe::byte_swap(value)) != 0;
+}
+
+bool A64Backend::ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                                 uint64_t value) {
+  return ReservedStoreImpl<uint64_t>(
+             context, address,
+             reinterpret_cast<uint64_t>(
+                 context->TranslateVirtual<uint64_t*>(address)),
+             xe::byte_swap(value)) != 0;
+}
+
+// ==========================================================================
 // ResolveFunction — runtime function resolution.
 // ==========================================================================
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   auto guest_context = reinterpret_cast<ppc::PPCContext*>(raw_context);
   auto thread_state = guest_context->thread_state;
   assert_not_zero(target_address);
+
+  // Longjmp re-entry: resume inside an existing function frame instead of
+  // re-running its prolog. Mirrors x64_emitter.cc::ResolveFunction.
+  auto* processor = thread_state->processor();
+  if (cvars::a64_enable_host_guest_stack_synchronization &&
+      target_address <= 0xFFFFFFFFu) {
+    auto* module_for_address =
+        processor->LookupModule(static_cast<uint32_t>(target_address));
+    auto* xexmod = dynamic_cast<XexModule*>(module_for_address);
+    if (xexmod) {
+      InfoCacheFlags* flags = xexmod->GetInstructionAddressFlags(
+          static_cast<uint32_t>(target_address));
+      if (flags && flags->is_return_site) {
+        uintptr_t host_address = 0;
+        for (auto* entry : processor->FindFunctionsWithAddress(
+                 static_cast<uint32_t>(target_address))) {
+          auto* afunc = static_cast<A64Function*>(entry);
+          host_address = afunc->MapGuestAddressToMachineCode(
+              static_cast<uint32_t>(target_address));
+          if (host_address &&
+              afunc->machine_code() !=
+                  reinterpret_cast<const uint8_t*>(host_address)) {
+            auto* backend = static_cast<A64Backend*>(processor->backend());
+            auto* backend_context =
+                backend->BackendContextForGuestContext(guest_context);
+            const uint32_t sync_depth = FindStackpointSyncDepth(
+                backend_context->stackpoints,
+                backend_context->current_stackpoint_depth,
+                static_cast<uint32_t>(guest_context->r[1]));
+            if (sync_depth != 0) {
+              backend_context->pending_stackpoint_sync_depth = sync_depth;
+              return host_address;
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
 
   auto fn = thread_state->processor()->ResolveFunction(
       static_cast<uint32_t>(target_address));
@@ -556,23 +730,32 @@ static void BuildGuestTrampoline(uint8_t* buf, void* proc, void* userdata1,
 A64Backend::A64Backend() {
   code_cache_ = A64CodeCache::Create();
 
-  // Allocate executable memory for guest trampolines.
-  uint32_t base_address = 0x10000;
+  // Prefer a sub-2GB slot so fast indirection (rel32) is usable; fall back
+  // to an OS-chosen address if none is available. macOS rejects fixed
+  // PROT_EXEC mappings in this range, so skip the scan entirely there.
   void* buf = nullptr;
-  while (base_address < 0x80000000) {
+#if !XE_PLATFORM_MAC
+  for (uint32_t base_address = 0x10000; base_address < 0x80000000;
+       base_address += 65536) {
     buf = memory::AllocFixed(
         reinterpret_cast<void*>(static_cast<uintptr_t>(base_address)),
         kGuestTrampolineSize * MAX_GUEST_TRAMPOLINES,
         xe::memory::AllocationType::kReserveCommit,
         xe::memory::PageAccess::kExecuteReadWrite);
-    if (!buf) {
-      base_address += 65536;
-    } else {
+    if (buf) {
       break;
     }
   }
+#endif
+  if (!buf) {
+    buf = memory::AllocFixed(nullptr,
+                             kGuestTrampolineSize * MAX_GUEST_TRAMPOLINES,
+                             xe::memory::AllocationType::kReserveCommit,
+                             xe::memory::PageAccess::kExecuteReadWrite);
+  }
   xenia_assert(buf);
   guest_trampoline_memory_ = reinterpret_cast<uint8_t*>(buf);
+  guest_trampolines_sub4gb_ = reinterpret_cast<uintptr_t>(buf) < 0x100000000ull;
   guest_trampoline_address_bitmap_.Resize(MAX_GUEST_TRAMPOLINES);
 }
 
@@ -591,7 +774,8 @@ bool A64Backend::Initialize(Processor* processor) {
     return false;
   }
 
-  // Initialize the code cache.
+  // Fast indirection is only viable if trampolines made it under 4GB.
+  code_cache_->set_allow_fast_indirection(guest_trampolines_sub4gb_);
   if (!code_cache_->Initialize()) {
     XELOGE("A64Backend: Failed to initialize code cache");
     return false;
@@ -635,9 +819,19 @@ bool A64Backend::Initialize(Processor* processor) {
         thunk_emitter.EmitGuestAndHostSynchronizeStackHelper();
   }
 
+  // Wire up reservation helpers used by RESERVED_LOAD/STORE codegen.
+  try_acquire_reservation_helper_ =
+      reinterpret_cast<void*>(&TryAcquireReservationHelper);
+  reserved_store_32_helper = reinterpret_cast<void*>(&ReservedStore32Helper);
+  reserved_store_64_helper = reinterpret_cast<void*>(&ReservedStore64Helper);
+
   // Set the indirection table default to point at the resolve thunk.
-  code_cache_->set_indirection_default(
-      uint32_t(reinterpret_cast<uint64_t>(resolve_function_thunk_)));
+  // Use 64-bit encoding: the resolve thunk address is encoded as a rel32
+  // offset if it lands inside the code cache, or as a tagged external-table
+  // index otherwise.
+  static_cast<A64CodeCache*>(code_cache_.get())
+      ->set_indirection_default_64(
+          reinterpret_cast<uint64_t>(resolve_function_thunk_));
 
   // Commit the indirection table range used by guest trampolines so that
   // CreateGuestTrampoline can call AddIndirection without faulting.
@@ -748,6 +942,7 @@ void A64Backend::DeinitializeBackendContext(void* ctx) {
 void A64Backend::PrepareForReentry(void* ctx) {
   auto* a64_ctx = BackendContextForGuestContext(ctx);
   a64_ctx->current_stackpoint_depth = 0;
+  a64_ctx->pending_stackpoint_sync_depth = 0;
 }
 
 uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
@@ -764,9 +959,15 @@ uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
   uint8_t* write_pos =
       &guest_trampoline_memory_[kGuestTrampolineSize * new_index];
 
+#if XE_PLATFORM_MAC
+  pthread_jit_write_protect_np(0);
+#endif
   BuildGuestTrampoline(write_pos, reinterpret_cast<void*>(proc), userdata1,
                        userdata2,
                        reinterpret_cast<void*>(guest_to_host_thunk_));
+#if XE_PLATFORM_MAC
+  pthread_jit_write_protect_np(1);
+#endif
 
   // Flush instruction cache for the new trampoline code.
 #if XE_PLATFORM_WIN32
@@ -781,9 +982,8 @@ uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
       GUEST_TRAMPOLINE_BASE +
       (static_cast<uint32_t>(new_index) * GUEST_TRAMPOLINE_MIN_LEN);
 
-  code_cache()->AddIndirection(
-      indirection_guest_addr,
-      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(write_pos)));
+  code_cache()->AddIndirection64(indirection_guest_addr,
+                                 reinterpret_cast<uint64_t>(write_pos));
 
   return indirection_guest_addr;
 }
@@ -794,6 +994,22 @@ void A64Backend::FreeGuestTrampoline(uint32_t trampoline_addr) {
   size_t index =
       (trampoline_addr - GUEST_TRAMPOLINE_BASE) / GUEST_TRAMPOLINE_MIN_LEN;
   guest_trampoline_address_bitmap_.Release(index);
+}
+
+bool A64Backend::trace_instr_available() const { return IsTracingInstr(); }
+bool A64Backend::trace_data_available() const { return IsTracingData(); }
+bool A64Backend::trace_func_available() const { return IsTracingFunc(); }
+bool A64Backend::trace_instr_enabled() const { return GetTraceInstrEnabled(); }
+void A64Backend::set_trace_instr_enabled(bool value) {
+  SetTraceInstrEnabled(value);
+}
+bool A64Backend::trace_data_enabled() const { return GetTraceDataEnabled(); }
+void A64Backend::set_trace_data_enabled(bool value) {
+  SetTraceDataEnabled(value);
+}
+bool A64Backend::trace_func_enabled() const { return GetTraceFuncEnabled(); }
+void A64Backend::set_trace_func_enabled(bool value) {
+  SetTraceFuncEnabled(value);
 }
 
 // PPC rounding mode (3-bit) to ARM64 FPCR value.
@@ -831,6 +1047,10 @@ void A64Backend::SetGuestRoundingMode(void* ctx, unsigned int mode) {
 }
 
 bool A64Backend::PopulatePseudoStacktrace(GuestPseudoStackTrace* st) {
+  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+    return false;
+  }
+
   ThreadState* thrd_state = ThreadState::Get();
   if (!thrd_state) {
     return false;
@@ -838,10 +1058,10 @@ bool A64Backend::PopulatePseudoStacktrace(GuestPseudoStackTrace* st) {
   ppc::PPCContext* ctx = thrd_state->context();
   A64BackendContext* backend_ctx = BackendContextForGuestContext(ctx);
 
-  uint32_t depth = backend_ctx->current_stackpoint_depth - 1;
-  if (static_cast<int32_t>(depth) < 1) {
+  if (!backend_ctx->stackpoints || backend_ctx->current_stackpoint_depth < 2) {
     return false;
   }
+  uint32_t depth = backend_ctx->current_stackpoint_depth - 1;
   uint32_t num_entries_to_populate =
       std::min(MAX_GUEST_PSEUDO_STACKTRACE_ENTRIES, depth);
 
@@ -871,7 +1091,9 @@ void A64Backend::RecordMMIOExceptionForGuestInstruction(void* host_address) {
         cpu::InfoCacheFlags* icf =
             xex_guest_module->GetInstructionAddressFlags(guestaddr);
         if (icf) {
-          icf->accessed_mmio = true;
+          cpu::InfoCacheFlags bits{};
+          bits.accessed_mmio = true;
+          cpu::AtomicSetInfoCacheFlags(icf, bits);
         }
       }
     }

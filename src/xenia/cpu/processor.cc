@@ -278,7 +278,9 @@ Function* Processor::ResolveFunction(uint32_t address) {
     if (xexmod) {
       auto addr_flags = xexmod->GetInstructionAddressFlags(address);
       if (addr_flags) {
-        addr_flags->was_resolved = 1;
+        InfoCacheFlags bits{};
+        bits.was_resolved = 1;
+        AtomicSetInfoCacheFlags(addr_flags, bits);
       }
     }
 
@@ -648,7 +650,8 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
       if ((scan_breakpoint->address_type() == Breakpoint::AddressType::kGuest &&
            scan_breakpoint->guest_address() == frame.guest_pc) ||
           (scan_breakpoint->address_type() == Breakpoint::AddressType::kHost &&
-           scan_breakpoint->host_address() == frame.host_pc)) {
+           scan_breakpoint->host_address() == frame.host_pc) ||
+          scan_breakpoint->ContainsHostAddress(frame.host_pc)) {
         breakpoint = scan_breakpoint;
         break;
       }
@@ -673,15 +676,14 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
     debug_listener_->OnExecutionPaused();
   }
 
-  ResumeAllThreads();
   thread_info->thread->thread()->Suspend();
 
   // Apply thread context changes.
   // TODO(benvanik): apply to all threads?
 #if XE_ARCH_AMD64
-  ex->set_resume_pc(thread_info->host_context.rip + 2);
+  ex->set_resume_pc(thread_info->host_context.rip);
 #elif XE_ARCH_ARM64
-  ex->set_resume_pc(thread_info->host_context.pc + 2);
+  ex->set_resume_pc(thread_info->host_context.pc);
 #else
 #error Instruction pointer not specified for the target CPU architecture.
 #endif  // XE_ARCH
@@ -693,6 +695,10 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
 void Processor::OnStepCompleted(ThreadDebugInfo* thread_info) {
   auto global_lock = global_critical_region_.Acquire();
   execution_state_ = ExecutionState::kPaused;
+
+  // Unlock before notifying to avoid deadlock with debugger stub.
+  global_lock.unlock();
+
   if (debug_listener_) {
     debug_listener_->OnExecutionPaused();
   }
@@ -704,6 +710,12 @@ bool Processor::OnUnhandledException(Exception* ex) {
   // If we have no listener return right away.
   // TODO(benvanik): DemandDebugListener()?
   if (!debug_listener_) {
+    return false;
+  }
+
+  // Only pause on exceptions when debugging is explicitly enabled.
+  // Without --debug flag, let the exception propagate normally.
+  if (!cvars::debug) {
     return false;
   }
 
@@ -721,15 +733,19 @@ bool Processor::OnUnhandledException(Exception* ex) {
                               ex->thread_context());
 
   // Stop and notify the listener.
-  // This will take control.
-  assert_true(execution_state_ == ExecutionState::kRunning);
+  if (execution_state_ != ExecutionState::kRunning) {
+    global_lock.unlock();
+    Thread::GetCurrentThread()->thread()->Suspend();
+    return true;
+  }
   execution_state_ = ExecutionState::kPaused;
 
-  // Notify debugger that exceution stopped.
-  // debug_listener_->OnException(info);
+  // Notify debugger that execution stopped.
+  debug_listener_->OnUnhandledException(ex);
   debug_listener_->OnExecutionPaused();
 
-  // Suspend self.
+  // Unlock before suspending to avoid deadlock with debugger stub.
+  global_lock.unlock();
   Thread::GetCurrentThread()->thread()->Suspend();
 
   return true;
@@ -940,7 +956,10 @@ void Processor::StepHostInstruction(uint32_t thread_id) {
                        thread_info->step_breakpoint.reset();
                        OnStepCompleted(thread_info);
                      }));
-  AddBreakpoint(thread_info->step_breakpoint.get());
+
+  // Add to front of breakpoints map, so this should get evaluated first
+  breakpoints_.insert(breakpoints_.begin(), thread_info->step_breakpoint.get());
+
   thread_info->step_breakpoint->Resume();
 
   // ResumeAllBreakpoints();
@@ -973,7 +992,10 @@ void Processor::StepGuestInstruction(uint32_t thread_id) {
                        thread_info->step_breakpoint.reset();
                        OnStepCompleted(thread_info);
                      }));
-  AddBreakpoint(thread_info->step_breakpoint.get());
+
+  // Add to front of breakpoints map, so this should get evaluated first
+  breakpoints_.insert(breakpoints_.begin(), thread_info->step_breakpoint.get());
+
   thread_info->step_breakpoint->Resume();
 
   // ResumeAllBreakpoints();
@@ -1299,62 +1321,59 @@ uint32_t Processor::CalculateNextGuestInstruction(ThreadDebugInfo* thread_info,
     return current_pc + 4;
   }
 }
+// These run a real lwarx/stwcx. loop, so they cancel any guest thread's
+// reservation on the same granule. Each returns the pre-update value.
+// context must be the calling thread's, it holds the reservation.
 uint32_t Processor::GuestAtomicIncrement32(ppc::PPCContext* context,
                                            uint32_t guest_address) {
-  uint32_t* host_address = context->TranslateVirtual<uint32_t*>(guest_address);
-
   uint32_t result;
-  while (true) {
-    result = *host_address;
-    // todo: should call a processor->backend function that acquires a
-    // reservation instead of using host atomics
-    if (xe::atomic_cas(result, xe::byte_swap(xe::byte_swap(result) + 1),
-                       host_address)) {
-      break;
-    }
-  }
-  return xe::byte_swap(result);
+  do {
+    result = backend()->ReservedLoad32(context, guest_address);
+  } while (!backend()->ReservedStore32(context, guest_address, result + 1));
+  return result;
 }
 uint32_t Processor::GuestAtomicDecrement32(ppc::PPCContext* context,
                                            uint32_t guest_address) {
-  uint32_t* host_address = context->TranslateVirtual<uint32_t*>(guest_address);
-
   uint32_t result;
-  while (true) {
-    result = *host_address;
-    // todo: should call a processor->backend function that acquires a
-    // reservation instead of using host atomics
-    if (xe::atomic_cas(result, xe::byte_swap(xe::byte_swap(result) - 1),
-                       host_address)) {
-      break;
-    }
-  }
-  return xe::byte_swap(result);
+  do {
+    result = backend()->ReservedLoad32(context, guest_address);
+  } while (!backend()->ReservedStore32(context, guest_address, result - 1));
+  return result;
 }
 
 uint32_t Processor::GuestAtomicOr32(ppc::PPCContext* context,
                                     uint32_t guest_address, uint32_t mask) {
-  return xe::byte_swap(
-      xe::atomic_or(context->TranslateVirtual<volatile int32_t*>(guest_address),
-                    xe::byte_swap(mask)));
+  uint32_t result;
+  do {
+    result = backend()->ReservedLoad32(context, guest_address);
+  } while (!backend()->ReservedStore32(context, guest_address, result | mask));
+  return result;
 }
 uint32_t Processor::GuestAtomicXor32(ppc::PPCContext* context,
                                      uint32_t guest_address, uint32_t mask) {
-  return xe::byte_swap(xe::atomic_xor(
-      context->TranslateVirtual<volatile int32_t*>(guest_address),
-      xe::byte_swap(mask)));
+  uint32_t result;
+  do {
+    result = backend()->ReservedLoad32(context, guest_address);
+  } while (!backend()->ReservedStore32(context, guest_address, result ^ mask));
+  return result;
 }
 uint32_t Processor::GuestAtomicAnd32(ppc::PPCContext* context,
                                      uint32_t guest_address, uint32_t mask) {
-  return xe::byte_swap(xe::atomic_and(
-      context->TranslateVirtual<volatile int32_t*>(guest_address),
-      xe::byte_swap(mask)));
+  uint32_t result;
+  do {
+    result = backend()->ReservedLoad32(context, guest_address);
+  } while (!backend()->ReservedStore32(context, guest_address, result & mask));
+  return result;
 }
 
+// Does not retry. A lost reservation reports a failed exchange, which is what
+// a guest compare-exchange loop sees.
 bool Processor::GuestAtomicCAS32(ppc::PPCContext* context, uint32_t old_value,
                                  uint32_t new_value, uint32_t guest_address) {
-  return xe::atomic_cas(xe::byte_swap(old_value), xe::byte_swap(new_value),
-                        context->TranslateVirtual<uint32_t*>(guest_address));
+  if (backend()->ReservedLoad32(context, guest_address) != old_value) {
+    return false;
+  }
+  return backend()->ReservedStore32(context, guest_address, new_value);
 }
 }  // namespace cpu
 }  // namespace xe

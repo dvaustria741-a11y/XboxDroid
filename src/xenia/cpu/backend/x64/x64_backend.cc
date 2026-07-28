@@ -13,14 +13,18 @@
 #include "third_party/capstone/include/capstone/capstone.h"
 #include "third_party/capstone/include/capstone/x86.h"
 
+#include "xenia/base/atomic.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/memory.h"
 #include "xenia/cpu/backend/x64/x64_assembler.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
 #include "xenia/cpu/backend/x64/x64_emitter.h"
 #include "xenia/cpu/backend/x64/x64_function.h"
 #include "xenia/cpu/backend/x64/x64_sequences.h"
 #include "xenia/cpu/backend/x64/x64_stack_layout.h"
+#include "xenia/cpu/backend/x64/x64_tracers.h"
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/stack_walker.h"
@@ -111,22 +115,35 @@ X64Backend::X64Backend() : Backend(), code_cache_(nullptr) {
   cs_option(capstone_handle_, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
   cs_option(capstone_handle_, CS_OPT_DETAIL, CS_OPT_ON);
   cs_option(capstone_handle_, CS_OPT_SKIPDATA, CS_OPT_OFF);
-  uint32_t base_address = 0x10000;
+  // Probe for trampoline memory sub-4GB.  Succeeds on most Windows/Linux
+  // configs; required by the fast indirection path (32-bit absolute slot
+  // values).  If it fails, fall back to any VA and the code cache will
+  // pick the encoded path. macOS rejects fixed sub-2GB PROT_EXEC, so skip
+  // the scan there.
   void* buf_trampoline_code = nullptr;
-  while (base_address < 0x80000000) {
+#if !XE_PLATFORM_MAC
+  for (uint32_t base_address = 0x10000; base_address < 0x80000000;
+       base_address += 65536) {
     buf_trampoline_code = memory::AllocFixed(
         (void*)(uintptr_t)base_address,
         sizeof(guest_trampoline_template) * MAX_GUEST_TRAMPOLINES,
         xe::memory::AllocationType::kReserveCommit,
         xe::memory::PageAccess::kExecuteReadWrite);
-    if (!buf_trampoline_code) {
-      base_address += 65536;
-    } else {
+    if (buf_trampoline_code) {
       break;
     }
   }
+#endif
+  if (!buf_trampoline_code) {
+    buf_trampoline_code = memory::AllocFixed(
+        nullptr, sizeof(guest_trampoline_template) * MAX_GUEST_TRAMPOLINES,
+        xe::memory::AllocationType::kReserveCommit,
+        xe::memory::PageAccess::kExecuteReadWrite);
+  }
   xenia_assert(buf_trampoline_code);
   guest_trampoline_memory_ = (uint8_t*)buf_trampoline_code;
+  guest_trampolines_sub4gb_ =
+      reinterpret_cast<uintptr_t>(buf_trampoline_code) < 0x100000000ull;
   guest_trampoline_address_bitmap_.Resize(MAX_GUEST_TRAMPOLINES);
 }
 
@@ -219,10 +236,18 @@ bool X64Backend::Initialize(Processor* processor) {
   }
 
   Xbyak::util::Cpu cpu;
+#if XE_PLATFORM_MAC
+  if (!cpu.has(Xbyak::util::Cpu::tAVX)) {
+    XELOGW(
+        "This CPU does not support AVX. Continuing anyway (performance and "
+        "compatibility may be reduced).");
+  }
+#else
   if (!cpu.has(Xbyak::util::Cpu::tAVX)) {
     XELOGE("This CPU does not support AVX. The emulator will now crash.");
     return false;
   }
+#endif
 
   // Need movbe to do advanced LOAD/STORE tricks.
   if (cvars::x64_extension_mask & kX64EmitMovbe) {
@@ -247,6 +272,8 @@ bool X64Backend::Initialize(Processor* processor) {
 
   code_cache_ = X64CodeCache::Create();
   Backend::code_cache_ = code_cache_.get();
+  // Fast indirection is only viable if trampolines made it under 4GB.
+  code_cache_->set_allow_fast_indirection(guest_trampolines_sub4gb_);
   if (!code_cache_->Initialize()) {
     return false;
   }
@@ -255,6 +282,9 @@ bool X64Backend::Initialize(Processor* processor) {
                                       GUEST_TRAMPOLINE_END);
   // Allocate emitter constant data.
   emitter_data_ = X64Emitter::PlaceConstData();
+  if (!emitter_data_) {
+    return false;
+  }
 
   // Generate thunks used to transition between jitted code and host code.
   XbyakAllocator allocator;
@@ -285,11 +315,9 @@ bool X64Backend::Initialize(Processor* processor) {
   vrsqrtefp_vector_helper =
       thunk_emitter.EmitVectorVRsqrteHelper(vrsqrtefp_scalar_helper);
   frsqrtefp_helper = thunk_emitter.EmitFrsqrteHelper();
-  // Set the code cache to use the ResolveFunction thunk for default
-  // indirections.
-  assert_zero(uint64_t(resolve_function_thunk_) & 0xFFFFFFFF00000000ull);
-  code_cache_->set_indirection_default(
-      uint32_t(uint64_t(resolve_function_thunk_)));
+  // Default indirection slots point at the resolve thunk.
+  code_cache_->set_indirection_default_64(
+      reinterpret_cast<uint64_t>(resolve_function_thunk_));
 
   // Allocate some special indirections.
   code_cache_->CommitExecutableRange(0x9FFF0000, 0x9FFFFFFF);
@@ -575,7 +603,9 @@ void X64Backend::RecordMMIOExceptionForGuestInstruction(void* host_address) {
             xex_guest_module->GetInstructionAddressFlags(guestaddr);
 
         if (icf) {
-          icf->accessed_mmio = true;
+          cpu::InfoCacheFlags bits{};
+          bits.accessed_mmio = true;
+          cpu::AtomicSetInfoCacheFlags(icf, bits);
         }
       }
     }
@@ -834,8 +864,8 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address);
 
 ResolveFunctionThunk X64HelperEmitter::EmitResolveFunctionThunk() {
 #if XE_PLATFORM_WIN32
-  // ebx = target PPC address
-  // rcx = context
+  // edx = target PPC address
+  // rsi = context
 
   _code_offsets code_offsets = {};
 
@@ -852,8 +882,7 @@ ResolveFunctionThunk X64HelperEmitter::EmitResolveFunctionThunk() {
   // Save volatile registers
   EmitSaveVolatileRegs();
 
-  mov(rcx, rsi);  // context
-  mov(rdx, rbx);
+  mov(rcx, rsi);  // arg0 = context (rdx is already the target PPC address)
   mov(rax, reinterpret_cast<uint64_t>(&ResolveFunction));
   call(rax);
 
@@ -865,7 +894,7 @@ ResolveFunctionThunk X64HelperEmitter::EmitResolveFunctionThunk() {
   jmp(rax);
 #else
   // Function is called with the following params:
-  // ebx = target PPC address
+  // edx = target PPC address
   // rsi = context
 
   // System-V ABI args:
@@ -891,8 +920,8 @@ ResolveFunctionThunk X64HelperEmitter::EmitResolveFunctionThunk() {
 
   // Save volatile registers
   EmitSaveVolatileRegs();
-  mov(rdi, rsi);  // context
-  mov(rsi, rbx);  // target PPC address
+  mov(rdi, rsi);  // arg0 = context
+  mov(rsi, rdx);  // arg1 = target PPC address
   mov(rax, reinterpret_cast<uint64_t>(&ResolveFunction));
   call(rax);
 
@@ -1404,7 +1433,7 @@ void* X64HelperEmitter::EmitFrsqrteHelper() {
   je(L25, CodeGenerator::T_NEAR);
 
   L(L9);
-  lea(edx, ptr[0 + rcx * 8]);
+  lea(edx, ptr[rcx * 8]);
   shr(rax, 49);
   sub(ecx, 1023);
   and_(edx, 8);
@@ -1483,39 +1512,23 @@ void* X64HelperEmitter::EmitFrsqrteHelper() {
   return EmitCurrentForOffsets(code_offsets);
 }
 
+// ecx = guest addr
+// rax holds the host addr and must survive the call
 void* X64HelperEmitter::EmitTryAcquireReservationHelper() {
   _code_offsets code_offsets = {};
   code_offsets.prolog = getSize();
 
-  Xbyak::Label already_has_a_reservation;
-  Xbyak::Label acquire_new_reservation;
-
-  btr(GetBackendFlagsPtr(), kX64BackendHasReserveBit);
   mov(r8, GetBackendCtxPtr(offsetof(X64BackendContext, reserve_helper_)));
-  jc(already_has_a_reservation);
-
-  shr(ecx, RESERVE_BLOCK_SHIFT);
-  xor_(r9d, r9d);
   mov(edx, ecx);
-  shr(edx, 6);  // divide by 64
-  lea(rdx, ptr[r8 + rdx * 8]);
-  and_(ecx, 64 - 1);
-
-  lock();
-  bts(qword[rdx], rcx);
-  // set flag on local backend context for thread to indicate our previous
-  // attempt to get the reservation succeeded
-  setnc(r9b);  // success = bitmap did not have a set bit at the idx
-  shl(r9b, kX64BackendHasReserveBit);
-
-  mov(GetBackendCtxPtr(offsetof(X64BackendContext, cached_reserve_offset)),
-      rdx);
-  mov(GetBackendCtxPtr(offsetof(X64BackendContext, cached_reserve_bit)), ecx);
-
-  or_(GetBackendCtxPtr(offsetof(X64BackendContext, flags)), r9d);
+  shr(edx, RESERVE_GRANULE_SHIFT);
+  and_(edx, RESERVE_ENTRY_MASK);
+  // snapshot the generation before the caller reads the value, ordered by TSO
+  mov(r9d, dword[r8 + rdx * 4]);
+  mov(GetBackendCtxPtr(offsetof(X64BackendContext, reserve_generation)), r9d);
+  mov(GetBackendCtxPtr(offsetof(X64BackendContext, reserve_address)), ecx);
+  // lwarx replaces any reservation this thread already held
+  bts(GetBackendFlagsPtr(), kX64BackendHasReserveBit);
   ret();
-  L(already_has_a_reservation);
-  DebugBreak();
 
   code_offsets.prolog_stack_alloc = getSize();
   code_offsets.body = getSize();
@@ -1526,73 +1539,54 @@ void* X64HelperEmitter::EmitTryAcquireReservationHelper() {
 // ecx=guest addr
 // r9 = host addr
 // r8 = value
-// if ZF is set and CF is set, we succeeded
+// if ZF is set, we succeeded
 void* X64HelperEmitter::EmitReservedStoreHelper(bool bit64) {
   _code_offsets code_offsets = {};
   code_offsets.prolog = getSize();
-  Xbyak::Label done;
-  Xbyak::Label reservation_isnt_for_our_addr;
-  Xbyak::Label somehow_double_cleared;
-  // carry must be set + zero flag must be set
+  Xbyak::Label fail;
 
+  // stwcx. always clears the reservation, stored or not
   btr(GetBackendFlagsPtr(), kX64BackendHasReserveBit);
+  jnc(fail);
 
-  jnc(done);
+  // the reservation must be for the address we're storing to
+  cmp(GetBackendCtxPtr(offsetof(X64BackendContext, reserve_address)), ecx);
+  jnz(fail);
 
   mov(rax, GetBackendCtxPtr(offsetof(X64BackendContext, reserve_helper_)));
-
-  shr(ecx, RESERVE_BLOCK_SHIFT);
   mov(edx, ecx);
-  shr(edx, 6);  // divide by 64
-  lea(rdx, ptr[rax + rdx * 8]);
-  // begin acquiring exclusive access to cacheline containing our bit
-  prefetchw(ptr[rdx]);
+  shr(edx, RESERVE_GRANULE_SHIFT);
+  and_(edx, RESERVE_ENTRY_MASK);
+  lea(rcx, ptr[rax + rdx * 4]);
+  // get exclusive access to the counter we're about to bump
+  prefetchw(ptr[rcx]);
 
-  cmp(GetBackendCtxPtr(offsetof(X64BackendContext, cached_reserve_offset)),
-      rdx);
-  jnz(reservation_isnt_for_our_addr);
+  // a store to this granule since our lwarx kills the reservation
+  mov(edx, dword[rcx]);
+  cmp(GetBackendCtxPtr(offsetof(X64BackendContext, reserve_generation)), edx);
+  jnz(fail);
 
   mov(rax,
       GetBackendCtxPtr(offsetof(X64BackendContext, cached_reserve_value_)));
 
-  // we need modulo bitsize, it turns out bittests' modulus behavior for the
-  // bitoffset only applies for register operands, for memory ones we bug out
-  // todo: actually, the above note may not be true, double check it
-  and_(ecx, 64 - 1);
-  cmp(GetBackendCtxPtr(offsetof(X64BackendContext, cached_reserve_bit)), ecx);
-  jnz(reservation_isnt_for_our_addr);
-
-  // was our memory modified by kernel code or something?
   lock();
   if (bit64) {
     cmpxchg(ptr[r9], r8);
-
   } else {
     cmpxchg(ptr[r9], r8d);
   }
-  // the ZF flag is unaffected by BTR! we exploit this for the retval
+  jnz(fail);
 
-  // cancel our lock on the 65k block
+  // the store landed, so kill other reservations on this granule
   lock();
-  btr(qword[rdx], rcx);
+  inc(dword[rcx]);
 
-  jnc(somehow_double_cleared);
-
-  L(done);
-  // i don't care that theres a dependency on the prev value of rax atm
-  // sadly theres no CF&ZF condition code
-  setz(al);
-  setc(ah);
-  cmp(ax, 0x0101);
+  xor_(eax, eax);  // ZF = 1
   ret();
 
-  // could be the same label, but otherwise we don't know where we came from
-  // when one gets triggered
-  L(reservation_isnt_for_our_addr);
-  DebugBreak();
-
-  L(somehow_double_cleared);  // somehow, something else cleared our reserve??
-  DebugBreak();
+  L(fail);
+  or_(eax, 1);  // ZF = 0
+  ret();
 
   code_offsets.prolog_stack_alloc = getSize();
   code_offsets.body = getSize();
@@ -1601,12 +1595,93 @@ void* X64HelperEmitter::EmitReservedStoreHelper(bool bit64) {
   return EmitCurrentForOffsets(code_offsets);
 }
 
+// Host counterpart of the two helpers above, on the same state and table.
+namespace {
+
+std::atomic<uint32_t>& ReserveGranule(ReserveHelper* reserve_helper,
+                                      uint32_t address) {
+  const uint32_t granule = address >> RESERVE_GRANULE_SHIFT;
+  return reserve_helper->generations[granule & RESERVE_ENTRY_MASK];
+}
+
+template <typename T>
+T ReservedLoadImpl(X64BackendContext* bctx, ppc::PPCContext* context,
+                   uint32_t address) {
+  T* host_address = context->TranslateVirtual<T*>(address);
+  swcache::PrefetchW(host_address);
+  auto& granule = ReserveGranule(bctx->reserve_helper_, address);
+  // snapshot the generation first, the acquire pins the value read below
+  bctx->reserve_generation = granule.load(std::memory_order_acquire);
+  bctx->reserve_address = address;
+  // lwarx replaces any reservation this thread already held
+  bctx->flags |= 1U << kX64BackendHasReserveBit;
+
+  const T raw = *host_address;
+  bctx->cached_reserve_value_ = static_cast<uint64_t>(raw);
+  return xe::byte_swap(raw);
+}
+
+template <typename T>
+bool ReservedStoreImpl(X64BackendContext* bctx, ppc::PPCContext* context,
+                       uint32_t address, T value) {
+  const uint32_t reserve_flag = 1U << kX64BackendHasReserveBit;
+  const bool had_reservation = (bctx->flags & reserve_flag) != 0;
+  // stwcx. always clears the reservation, stored or not
+  bctx->flags &= ~reserve_flag;
+  // the reservation must be for the address we're storing to
+  if (!had_reservation || bctx->reserve_address != address) {
+    return false;
+  }
+
+  auto& granule = ReserveGranule(bctx->reserve_helper_, address);
+  // a store to this granule since our load kills the reservation
+  if (granule.load(std::memory_order_acquire) != bctx->reserve_generation) {
+    return false;
+  }
+
+  if (!xe::atomic_cas(static_cast<T>(bctx->cached_reserve_value_),
+                      xe::byte_swap(value),
+                      context->TranslateVirtual<T*>(address))) {
+    return false;
+  }
+
+  // the store landed, so kill other reservations on this granule
+  granule.fetch_add(1, std::memory_order_release);
+  return true;
+}
+
+}  // namespace
+
+uint32_t X64Backend::ReservedLoad32(ppc::PPCContext* context,
+                                    uint32_t address) {
+  return ReservedLoadImpl<uint32_t>(BackendContextForGuestContext(context),
+                                    context, address);
+}
+
+uint64_t X64Backend::ReservedLoad64(ppc::PPCContext* context,
+                                    uint32_t address) {
+  return ReservedLoadImpl<uint64_t>(BackendContextForGuestContext(context),
+                                    context, address);
+}
+
+bool X64Backend::ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                                 uint32_t value) {
+  return ReservedStoreImpl<uint32_t>(BackendContextForGuestContext(context),
+                                     context, address, value);
+}
+
+bool X64Backend::ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                                 uint64_t value) {
+  return ReservedStoreImpl<uint64_t>(BackendContextForGuestContext(context),
+                                     context, address, value);
+}
+
 void X64HelperEmitter::EmitSaveVolatileRegs() {
   // Save off volatile registers.
   // mov(qword[rsp + offsetof(StackLayout::Thunk, r[0])], rax);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[1])], rcx);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[2])], rdx);
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[3])], rsi);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[4])], rdi);
 #endif
@@ -1621,13 +1696,30 @@ void X64HelperEmitter::EmitSaveVolatileRegs() {
   vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[3])], xmm3);
   vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[4])], xmm4);
   vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[5])], xmm5);
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+  // System V xmm6-15 are caller-saved and allocatable, but only trace
+  // instrumentation injects guest→host calls the register allocator can't see,
+  // so preserve them only when tracing is compiled in.
+  if (GetTracingMode()) {
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[6])], xmm6);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[7])], xmm7);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[8])], xmm8);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[9])], xmm9);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[10])], xmm10);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[11])], xmm11);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[12])], xmm12);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[13])], xmm13);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[14])], xmm14);
+    vmovups(qword[rsp + offsetof(StackLayout::Thunk, xmm[15])], xmm15);
+  }
+#endif
 }
 
 void X64HelperEmitter::EmitLoadVolatileRegs() {
   // mov(rax, qword[rsp + offsetof(StackLayout::Thunk, r[0])]);
   mov(rcx, qword[rsp + offsetof(StackLayout::Thunk, r[1])]);
   mov(rdx, qword[rsp + offsetof(StackLayout::Thunk, r[2])]);
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   mov(rsi, qword[rsp + offsetof(StackLayout::Thunk, r[3])]);
   mov(rdi, qword[rsp + offsetof(StackLayout::Thunk, r[4])]);
 #endif
@@ -1642,6 +1734,21 @@ void X64HelperEmitter::EmitLoadVolatileRegs() {
   vmovups(xmm3, qword[rsp + offsetof(StackLayout::Thunk, xmm[3])]);
   vmovups(xmm4, qword[rsp + offsetof(StackLayout::Thunk, xmm[4])]);
   vmovups(xmm5, qword[rsp + offsetof(StackLayout::Thunk, xmm[5])]);
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+  // Mirror of the gated saves in EmitSaveVolatileRegs.
+  if (GetTracingMode()) {
+    vmovups(xmm6, qword[rsp + offsetof(StackLayout::Thunk, xmm[6])]);
+    vmovups(xmm7, qword[rsp + offsetof(StackLayout::Thunk, xmm[7])]);
+    vmovups(xmm8, qword[rsp + offsetof(StackLayout::Thunk, xmm[8])]);
+    vmovups(xmm9, qword[rsp + offsetof(StackLayout::Thunk, xmm[9])]);
+    vmovups(xmm10, qword[rsp + offsetof(StackLayout::Thunk, xmm[10])]);
+    vmovups(xmm11, qword[rsp + offsetof(StackLayout::Thunk, xmm[11])]);
+    vmovups(xmm12, qword[rsp + offsetof(StackLayout::Thunk, xmm[12])]);
+    vmovups(xmm13, qword[rsp + offsetof(StackLayout::Thunk, xmm[13])]);
+    vmovups(xmm14, qword[rsp + offsetof(StackLayout::Thunk, xmm[14])]);
+    vmovups(xmm15, qword[rsp + offsetof(StackLayout::Thunk, xmm[15])]);
+  }
+#endif
 }
 
 void X64HelperEmitter::EmitSaveNonvolatileRegs() {
@@ -1834,9 +1941,8 @@ uint32_t X64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
       GUEST_TRAMPOLINE_BASE +
       (static_cast<uint32_t>(new_index) * GUEST_TRAMPOLINE_MIN_LEN);
 
-  code_cache()->AddIndirection(
-      indirection_guest_addr,
-      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(write_pos)));
+  code_cache()->AddIndirection64(indirection_guest_addr,
+                                 reinterpret_cast<uint64_t>(write_pos));
 
   return indirection_guest_addr;
 }
@@ -1847,6 +1953,22 @@ void X64Backend::FreeGuestTrampoline(uint32_t trampoline_addr) {
   size_t index =
       (trampoline_addr - GUEST_TRAMPOLINE_BASE) / GUEST_TRAMPOLINE_MIN_LEN;
   guest_trampoline_address_bitmap_.Release(index);
+}
+
+bool X64Backend::trace_instr_available() const { return IsTracingInstr(); }
+bool X64Backend::trace_data_available() const { return IsTracingData(); }
+bool X64Backend::trace_func_available() const { return IsTracingFunc(); }
+bool X64Backend::trace_instr_enabled() const { return GetTraceInstrEnabled(); }
+void X64Backend::set_trace_instr_enabled(bool value) {
+  SetTraceInstrEnabled(value);
+}
+bool X64Backend::trace_data_enabled() const { return GetTraceDataEnabled(); }
+void X64Backend::set_trace_data_enabled(bool value) {
+  SetTraceDataEnabled(value);
+}
+bool X64Backend::trace_func_enabled() const { return GetTraceFuncEnabled(); }
+void X64Backend::set_trace_func_enabled(bool value) {
+  SetTraceFuncEnabled(value);
 }
 }  // namespace x64
 }  // namespace backend

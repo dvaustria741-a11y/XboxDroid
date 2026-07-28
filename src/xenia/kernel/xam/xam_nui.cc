@@ -9,6 +9,7 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -73,6 +74,14 @@ dword_result_t XamNuiGetDeviceStatus_entry(
   return kinect_initialized ? X_ERROR_SUCCESS : 0xC0050006;
 }
 DECLARE_XAM_EXPORT1(XamNuiGetDeviceStatus, kNone, kStub);
+
+dword_result_t XamXStudioRequest_entry(dword_t request_type,
+                                       lpdword_t result_ptr) {
+  // Return failure to indicate XStudio/dev features not available.
+  XELOGW("XamXStudioRequest called, returning X_E_FAIL");
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamXStudioRequest, kNone, kStub);
 
 dword_result_t XamUserNuiGetUserIndex_entry(unknown_t unk, lpdword_t index) {
   return X_E_NO_SUCH_USER;
@@ -370,7 +379,7 @@ dword_result_t XamShowNuiTroubleshooterUI_entry(dword_t user_index,
               ->Then(&fence);
         })) {
       kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-      fence.Wait();
+      GuestScheduler::WaitOnFence(fence);
       kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
     }
   }

@@ -18,8 +18,9 @@ else()
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
 endif()
 
-# Add .s files but exclude from build (they're test data)
-file(GLOB _ppc_asm  "${CMAKE_CURRENT_SOURCE_DIR}/*.s")
+# Attach the PPC assembly test inputs to the target for IDE visibility;
+# they're test data, not compiled code.
+file(GLOB _ppc_asm "${CMAKE_CURRENT_SOURCE_DIR}/*.s")
 target_sources(xenia-cpu-ppc-tests PRIVATE ${_ppc_asm})
 set_source_files_properties(${_ppc_asm} PROPERTIES HEADER_FILE_ONLY TRUE)
 
@@ -39,5 +40,9 @@ elseif(XE_TARGET_AARCH64)
   target_link_libraries(xenia-cpu-ppc-tests PRIVATE xenia-cpu-backend-a64)
 endif()
 
+# See src/xenia/apu/CMakeLists.txt — xenia-apu requires xenia-apu-sdl on Linux.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(xenia-cpu-ppc-tests PRIVATE xenia-apu-sdl)
+endif()
+
 xe_target_defaults(xenia-cpu-ppc-tests)
-add_test(NAME xenia-cpu-ppc-tests COMMAND xenia-cpu-ppc-tests)

@@ -36,15 +36,30 @@ class XMutant : public XObject {
   static object_ref<XMutant> Restore(KernelState* kernel_state,
                                      ByteStream* stream);
 
+  // Mark every mutant in |thread|'s mutants_list abandoned and unlink it.
+  // Called from XThread::Exit/Terminate.
+  static void AbandonAllOwnedByThread(KernelState* kernel_state,
+                                      XThread* thread);
+
  protected:
-  xe::threading::WaitHandle* GetWaitHandle() override { return mutant_.get(); }
+  xe::threading::WaitHandle* GetWaitHandle() override {
+    return free_signal_.get();
+  }
   void WaitCallback() override;
+  bool IsReenteredByCurrentThread() override;
+  X_STATUS AcquireStatus() override;
 
  private:
   XMutant();
 
-  std::unique_ptr<xe::threading::Mutant> mutant_;
+  // Signaled while unowned. A count rather than a host mutant, whose owner is
+  // the host thread, which many guest threads share and can migrate between.
+  std::unique_ptr<xe::threading::Semaphore> free_signal_;
+  // The only source of truth for ownership.
   std::atomic<XThread*> owning_thread_{nullptr};
+  // Recursive acquires never touch free_signal_, so count them here. Only the
+  // current owner mutates it, so no synchronization.
+  uint32_t recursion_count_ = 0;
 };
 
 }  // namespace kernel
