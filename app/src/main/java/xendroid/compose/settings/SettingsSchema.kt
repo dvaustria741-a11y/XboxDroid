@@ -87,6 +87,10 @@ object SettingsSchema {
             b("Kernel", "allow_incompatible_title_update", "Allow incompatible title update", true),
             b("Kernel", "apply_title_update", "Apply title update", true),
             b("Kernel", "kernel_debug_monitor", "Kernel debug monitor", false),
+            // Cooperative fiber scheduler: experimental, and all three need a restart.
+            b("Kernel", "guest_scheduler", "Cooperative guest scheduler", false),
+            i("Kernel", "guest_scheduler_cpus", "Scheduler dispatch threads", 6, 1, 6),
+            i("Kernel", "guest_scheduler_quantum_us", "Scheduler quantum (us)", 1000, 100, 10000),
         )),
 
         SettingsCategory("HID", listOf(
@@ -137,6 +141,7 @@ object SettingsSchema {
             // games render better without it, and it avoids the stall).
             l("GPU", "readback_resolve", "Readback resolve", "uma",
                 "uma" to "UMA (direct map, no copy)",
+                "uma-sync" to "UMA sync (coherent in-frame, slower)",
                 "fast" to "Fast (copy every frame)", "some" to "Some (skip copy on cache hit)",
                 "full" to "Full (wait for GPU, slow)", "none" to "None (disabled)"),
             // How guest occlusion queries (PM4 EVENT_WRITE_ZPD) are serviced. 'fake' fabricates a
@@ -169,6 +174,8 @@ object SettingsSchema {
             b("GPU", "mrt_edram_used_range_clamp_to_min", "MRT EDRAM used-range clamp to min", true),
             b("GPU", "execute_unclipped_draw_vs_on_cpu", "Unclipped draw VS on CPU", true),
             b("GPU", "readback_memexport", "Readback memexport", false),
+            b("GPU", "memexport_enable", "Memexport to CPU", false),
+            b("GPU", "memexport_await_fences", "Memexport fence waits", false),
             b("GPU", "force_convert_triangle_fans_to_lists", "Convert triangle fans to lists", false),
             b("GPU", "non_seamless_cube_map", "Non-seamless cube map", true),
             b("GPU", "depth_float24_round", "Depth float24 round", false),

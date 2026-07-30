@@ -57,10 +57,9 @@ DECLARE_string(hid);
 DECLARE_bool(guide_button);
 
 DECLARE_bool(clear_memory_page_state);
+DECLARE_bool(memexport_await_fences);
 
 DECLARE_string(readback_resolve);
-
-DECLARE_bool(readback_memexport);
 
 DEFINE_bool(fullscreen, false, "Whether to launch the emulator in fullscreen.",
             "Display");
@@ -1542,8 +1541,9 @@ void EmulatorWindow::ToggleGPUSetting(gpu::GPUSetting setting) {
       SaveGPUSetting(GPUSetting::ClearMemoryPageState,
                      !cvars::clear_memory_page_state);
       break;
-    case GPUSetting::ReadbackMemexport:
-      SaveGPUSetting(GPUSetting::ReadbackMemexport, !cvars::readback_memexport);
+    case GPUSetting::MemexportAwaitFences:
+      SaveGPUSetting(GPUSetting::MemexportAwaitFences,
+                     !cvars::memexport_await_fences);
       break;
   }
 }
@@ -1561,19 +1561,29 @@ void EmulatorWindow::CycleReadbackResolve() {
   }
 
   // Edge moved SetReadbackResolveMode onto CommandProcessor and switched it
-  // from a string to the ReadbackResolveMode enum. Preserve the original
-  // cycle order: fast -> full -> none -> fast.
-  const std::string& current = cvars::readback_resolve;
-  if (current == "fast") {
-    command_processor->SetReadbackResolveMode(
-        gpu::ReadbackResolveMode::kFull);
-  } else if (current == "full") {
-    command_processor->SetReadbackResolveMode(
-        gpu::ReadbackResolveMode::kDisabled);
-  } else {
-    command_processor->SetReadbackResolveMode(
-        gpu::ReadbackResolveMode::kFast);
+  // from a string to the ReadbackResolveMode enum (kFull is now kAll).
+  // Cycle order: disabled -> fast -> all -> uma -> disabled.
+  gpu::ReadbackResolveMode current =
+      command_processor->GetReadbackResolveMode();
+  gpu::ReadbackResolveMode next;
+  switch (current) {
+    case gpu::ReadbackResolveMode::kDisabled:
+      next = gpu::ReadbackResolveMode::kFast;
+      break;
+    case gpu::ReadbackResolveMode::kFast:
+      next = gpu::ReadbackResolveMode::kAll;
+      break;
+    case gpu::ReadbackResolveMode::kAll:
+      next = gpu::ReadbackResolveMode::kUma;
+      break;
+    case gpu::ReadbackResolveMode::kUma:
+      next = gpu::ReadbackResolveMode::kUmaSync;
+      break;
+    default:
+      next = gpu::ReadbackResolveMode::kDisabled;
+      break;
   }
+  command_processor->SetReadbackResolveMode(next);
 }
 
 void EmulatorWindow::DisplayHotKeysConfig() {
@@ -1823,7 +1833,7 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
 
 void EmulatorWindow::ClearDialogs() {
   imgui_drawer_.get()->ClearDialogs();
-  emulator_->kernel_state()->xam_state()->xam_dialogs_shown_ = 0;
+  emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
 }
 
 }  // namespace app

@@ -19,18 +19,18 @@ class SettingsSchemaTest {
     // (must be true on Android -- forced natively, false black-screens the app -- so it
     // is not a valid user choice). GPU|readback_resolve and APU|xma_decoder are string
     // cvars (fast/some/full/none and the decoder name), hence ListChoice rather than Bool.
-    @Test fun total_entry_count_is_115() {
-        assertEquals(115, all.size)
+    @Test fun total_entry_count_is_120() {
+        assertEquals(120, all.size)
         assertEquals(
-            115,
+            120,
             all.count { it is Setting.Bool } + all.count { it is Setting.IntRange } +
                 all.count { it is Setting.ListChoice } + all.count { it is Setting.Action },
         )
     }
 
     @Test fun counts_by_type_match_verified_inventory() {
-        assertEquals(83, all.count { it is Setting.Bool })
-        assertEquals(10, all.count { it is Setting.IntRange })
+        assertEquals(86, all.count { it is Setting.Bool })
+        assertEquals(12, all.count { it is Setting.IntRange })
         assertEquals(20, all.count { it is Setting.ListChoice })
         assertEquals(2, all.count { it is Setting.Action })
     }

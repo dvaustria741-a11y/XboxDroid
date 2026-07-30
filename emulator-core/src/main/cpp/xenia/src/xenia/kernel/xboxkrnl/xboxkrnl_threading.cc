@@ -10,7 +10,9 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/math.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/profiling.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -236,6 +238,7 @@ uint32_t NtResumeThread(uint32_t handle, uint32_t* suspend_count_ptr) {
 
 dword_result_t NtResumeThread_entry(dword_t handle,
                                     lpdword_t suspend_count_ptr) {
+  SCOPE_profile_cpu_i("guestsync", "NtResumeThread");
   uint32_t suspend_count =
       suspend_count_ptr ? static_cast<uint32_t>(*suspend_count_ptr) : 0u;
 
@@ -266,6 +269,7 @@ DECLARE_XBOXKRNL_EXPORT1(KeResumeThread, kThreading, kImplemented);
 dword_result_t NtSuspendThread_entry(dword_t handle,
                                      lpdword_t suspend_count_ptr,
                                      const ppc_context_t& context) {
+  SCOPE_profile_cpu_i("guestsync", "NtSuspendThread");
   X_RESULT result = X_STATUS_SUCCESS;
   uint32_t suspend_count = 0;
 
@@ -388,7 +392,7 @@ dword_result_t KeQueryBasePriorityThread_entry(lpvoid_t thread_ptr) {
 
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
   if (thread) {
-    priority = thread->QueryPriority();
+    priority = thread->QueryBasePriority();
   }
 
   return priority;
@@ -401,8 +405,7 @@ dword_result_t KeSetBasePriorityThread_entry(lpvoid_t thread_ptr,
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
 
   if (thread) {
-    prev_priority = thread->QueryPriority();
-    thread->SetPriority(increment);
+    prev_priority = thread->SetBasePriority(static_cast<int32_t>(increment));
   }
 
   return prev_priority;
@@ -480,6 +483,7 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
                                             dword_t alertable,
                                             lpqword_t interval_ptr,
                                             const ppc_context_t& context) {
+  SCOPE_profile_cpu_i("guestsync", "KeDelayExecutionThread");
   uint64_t interval = interval_ptr ? static_cast<uint64_t>(*interval_ptr) : 0u;
   return KeDelayExecutionThread(processor_mode, alertable,
                                 interval_ptr ? &interval : nullptr, context);
@@ -488,8 +492,9 @@ DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
 
 dword_result_t NtYieldExecution_entry() {
+  SCOPE_profile_cpu_i("guestsync", "NtYieldExecution");
   if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
-    kernel_state()->guest_scheduler()->YieldCurrentThread();
+    kernel_state()->guest_scheduler()->YieldCurrentThread(true);
   } else {
     xe::threading::MaybeYield();
   }
@@ -1040,6 +1045,7 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
                                            dword_t processor_mode,
                                            dword_t alertable,
                                            lpqword_t timeout_ptr) {
+  SCOPE_profile_cpu_i("guestsync", "KeWaitForSingleObject");
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   return xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode,
                                  alertable, timeout_ptr ? &timeout : nullptr);
@@ -1080,6 +1086,7 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
                                              dword_t wait_mode,
                                              dword_t alertable,
                                              lpqword_t timeout_ptr) {
+  SCOPE_profile_cpu_i("guestsync", "NtWaitForSingleObjectEx");
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   return NtWaitForSingleObjectEx(object_handle, wait_mode, alertable,
                                  timeout_ptr ? &timeout : nullptr);
@@ -1091,6 +1098,7 @@ dword_result_t KeWaitForMultipleObjects_entry(
     dword_t count, lpdword_t objects_ptr, dword_t wait_type,
     dword_t wait_reason, dword_t processor_mode, dword_t alertable,
     lpqword_t timeout_ptr, lpvoid_t wait_block_array_ptr) {
+  SCOPE_profile_cpu_i("guestsync", "KeWaitForMultipleObjects");
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
 
   if (alertable) {
@@ -1100,8 +1108,10 @@ dword_result_t KeWaitForMultipleObjects_entry(
     }
   }
 
-  assert_true(count <= 64);
   object_ref<XObject> objects[64];
+  if (count > xe::countof(objects)) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
   {
     auto crit = global_critical_region::AcquireDirect();
     for (uint32_t n = 0; n < count; n++) {
@@ -1142,8 +1152,10 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, xe::be<uint32_t>* handles,
     }
   }
 
-  assert_true(count <= 64);
   object_ref<XObject> objects[64];
+  if (count > xe::countof(objects)) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
 
   /*
         Reserving to squash the constant reallocations, in a benchmark of one
@@ -1181,6 +1193,7 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, xe::be<uint32_t>* handles,
 dword_result_t NtWaitForMultipleObjectsEx_entry(
     dword_t count, lpdword_t handles, dword_t wait_type, dword_t wait_mode,
     dword_t alertable, lpqword_t timeout_ptr) {
+  SCOPE_profile_cpu_i("guestsync", "NtWaitForMultipleObjectsEx");
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   if (!count || count > 64 ||
       (wait_type != X_KWAIT_REASON::WaitAny && wait_type)) {
@@ -1228,8 +1241,13 @@ DECLARE_XBOXKRNL_EXPORT3(NtSignalAndWaitForSingleObjectEx, kThreading,
 
 static void PrefetchForCAS(const void* value) { swcache::PrefetchW(value); }
 
+// Brief spin budget for a spinlock held on another dispatch thread, roughly
+// the cost of the fiber reschedule it avoids.
+static constexpr int kRemoteHolderSpinTries = 16;
+
 uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
                                bool change_irql) {
+  SCOPE_profile_cpu_i("guestsync", "SpinLockAcquire");
   auto old_irql = change_irql ? xeKfRaiseIrql(ctx, 2) : 0;
 
   PrefetchForCAS(lock);
@@ -1242,6 +1260,35 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
   // Lock.
   while (
       !xe::atomic_cas(0, xe::byte_swap(our_pcr), &lock->prcb_of_owner.value)) {
+    // Under the cooperative scheduler the holder may be a fiber queued behind
+    // us on this dispatch thread, so it can only run if we yield the fiber. A
+    // holder running on another dispatch thread releases in nanoseconds, so
+    // spin briefly there before paying a reschedule.
+    if (XThread::GetCurrentFiberThread()) {
+      uint32_t owner_pcr_be = lock->prcb_of_owner.value;
+      if (!owner_pcr_be) {
+        continue;  // freed between the CAS and the read
+      }
+      auto* owner_kpcr =
+          ctx->TranslateVirtual<X_KPCR*>(xe::byte_swap(owner_pcr_be));
+      auto* scheduler = ctx->kernel_state->guest_scheduler();
+      if (scheduler->DispatchCpuOf(owner_kpcr->prcb_data.current_cpu) !=
+          scheduler->DispatchCpuOf(our_cpu)) {
+        volatile uint32_t* owner_raw = &lock->prcb_of_owner.value;
+        for (int i = 0; i < kRemoteHolderSpinTries && *owner_raw; ++i) {
+#if XE_ARCH_AMD64 == 1
+          _mm_pause();
+#endif
+        }
+        if (!*owner_raw) {
+          continue;
+        }
+        // Still held past the budget, e.g. a holder preempted mid-hold, so
+        // stop burning the slice.
+      }
+      GuestScheduler::SpinYield();
+      continue;
+    }
     // On real hardware, threads sharing a Xenon HW thread are serialized by
     // the kernel scheduler — the spinner would be preempted within one
     // timeslice (~1ms) so the holder can make progress.  In the naive
@@ -1421,11 +1468,13 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
     memory->SystemHeapFree(apc_ptr);
     return X_STATUS_UNSUCCESSFUL;
   }
-  // no-op, just meant to awaken a sleeping alertable thread to process real
-  // apcs. A fiber-backed thread has no host thread; cooperative alertable
-  // wake-on-APC is handled by the scheduler in a later stage.
+  // Awaken a sleeping alertable thread to process real apcs. A host thread gets
+  // a no-op user callback to break its wait, a fiber gets a scheduler poke so
+  // its alertable poll re-runs.
   if (thread->thread()) {
     thread->thread()->QueueUserCallback([]() {});
+  } else {
+    kernelstate->guest_scheduler()->WakeAll();
   }
   return X_STATUS_SUCCESS;
 }

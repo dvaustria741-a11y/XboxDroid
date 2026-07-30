@@ -262,6 +262,16 @@ struct MEMORY_BARRIER
 EMITTER_OPCODE_TABLE(OPCODE_MEMORY_BARRIER, MEMORY_BARRIER);
 
 // ============================================================================
+// OPCODE_LOAD_BARRIER
+// ============================================================================
+struct LOAD_BARRIER : Sequence<LOAD_BARRIER, I<OPCODE_LOAD_BARRIER, VoidOp>> {
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    e.dmb(Xbyak_aarch64::ISHLD);
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_LOAD_BARRIER, LOAD_BARRIER);
+
+// ============================================================================
 // OPCODE_CACHE_CONTROL
 // ============================================================================
 struct CACHE_CONTROL
@@ -1359,6 +1369,11 @@ static const Xbyak_aarch64::XReg& LoadBackendCtxPtr(A64Emitter& e) {
 //    succeeds and the guest retry loop livelocks (hung Forza Horizon). The CAS
 //    is a single atomic with no such window. The guest byte-swap is a separate
 //    HIR op on both paths, so the captured/compared value is the raw word.
+// The software helpers now key a global generation counter per 128-byte
+// granule rather than a bitmap: a successful stwcx. bumps its granule and so
+// kills every other thread's reservation on it. Doing that purely inline with
+// ldaxr/stlxr would only cover contention on the same host cache line, and ABA
+// on the cached value would silently succeed.
 struct RESERVED_LOAD_I32
     : Sequence<RESERVED_LOAD_I32, I<OPCODE_RESERVED_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {

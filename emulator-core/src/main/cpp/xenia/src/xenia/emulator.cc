@@ -146,6 +146,7 @@ DEFINE_int32(priority_class, 0,
              "values: 0 - Normal, 1 - Above normal, 2 - High",
              "General");
 
+DECLARE_int32(console_type);
 
 namespace xe {
 using namespace xe::literals;
@@ -420,7 +421,11 @@ X_STATUS Emulator::Setup(
   // HLE kernel modules.
   LOAD_KERNEL_MODULE(xboxkrnl::XboxkrnlModule);
   LOAD_KERNEL_MODULE(xam::XamModule);
-  LOAD_KERNEL_MODULE(xbdm::XbdmModule);
+
+  // 415608C3 anti-cheat checks if XDBM is loaded.
+  if (cvars::console_type >= 0) {
+    LOAD_KERNEL_MODULE(xbdm::XbdmModule);
+  }
 #undef LOAD_KERNEL_MODULE
   plugin_loader_ = std::make_unique<xe::patcher::PluginLoader>(
       kernel_state_.get(), storage_root() / "plugins");
@@ -702,7 +707,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
     case FileSignatureType::XEX1:
     case FileSignatureType::XEX2:
     case FileSignatureType::ELF: {
-      mount_result = MountPath(path, "\\Device\\Harddisk0\\Partition1");
+      mount_result = MountPath(path, "\\Device\\Package_0");
       return mount_result ? mount_result : LaunchXexFile(path);
     } break;
     case FileSignatureType::LIVE:
@@ -731,7 +736,7 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   // We create a virtual filesystem pointing to its directory and symlink
   // that to the game filesystem.
   // e.g., /my/files/foo.xex will get a local fs at:
-  // \\Device\\Harddisk0\\Partition1
+  // \\Device\\Package_0
   // and then get that symlinked to game:\, so
   // -> game:\foo.xex
   // Get just the filename (foo.xex).
@@ -1982,6 +1987,9 @@ bool Emulator::ExceptionCallbackThunk(Exception* ex, void* data) {
   if (self) {
     self->guest_object<kernel::X_KTHREAD>()->thread_state =
         kernel::KTHREAD_STATE_TERMINATED;
+    // The crash may have landed inside a wait poll, which never unwinds, and a
+    // dead entry gates every other cooperative waiter on that object.
+    kernel::XObject::AbandonCooperativeWait(self);
     auto* scheduler = self->kernel_state()->guest_scheduler();
     scheduler->ForgetThread(self);
     while (true) {
@@ -2032,11 +2040,25 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     // loop, so if a fiber is current halt just that fiber to keep the
     // dispatcher and the other fibers alive.
     if (auto* fiber_self = kernel::XThread::GetCurrentFiberThread()) {
+      // ASLR moves the absolute PC each run, so log a stable module offset that
+      // resolves against the pdb with "ln xenia_edge+<offset>".
+      uint64_t module_base = 0;
+#if XE_PLATFORM_WIN32 == 1
+      module_base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+#endif
+      uint64_t module_offset =
+          (module_base && ex->pc() >= module_base) ? ex->pc() - module_base : 0;
+      // lr names the guest caller that entered the shim.
+      uint32_t guest_lr =
+          fiber_self->thread_state()
+              ? uint32_t(fiber_self->thread_state()->context()->lr)
+              : 0;
       XELOGE(
           "Host-side crash on fiber thread (handle 0x{:08X}, guest tid "
-          "0x{:08X}) at host PC 0x{:016X}. Halting fiber to keep the "
-          "dispatcher alive.",
-          fiber_self->handle(), fiber_self->thread_id(), ex->pc());
+          "0x{:08X}) at host PC 0x{:016X} (module+0x{:X}, guest lr 0x{:08X}). "
+          "Halting fiber to keep the dispatcher alive.",
+          fiber_self->handle(), fiber_self->thread_id(), ex->pc(),
+          module_offset, guest_lr);
       ex->set_resume_pc(reinterpret_cast<uint64_t>(&HaltCrashedFiberThunk));
       return true;
     }
@@ -2333,6 +2355,17 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           result = CompleteLaunch(path, module_path);
         });
     return result;
+  }
+
+  // Expose the HDD content partition. Games that resolve saves/DLC to a raw
+  // \Device\Harddisk0\Partition1\Content path via XamContentResolve open it
+  // directly, not through the save:/dlc: symlinks. Without this the open lands
+  // on the NullDevice below and fails, so a title can never see its own
+  // existing content and keeps recreating it.
+  auto content_device = std::make_unique<vfs::HostPathDevice>(
+      "\\Device\\Harddisk0\\Partition1\\Content", content_root_, false, true);
+  if (content_device->Initialize()) {
+    file_system_->RegisterDevice(std::move(content_device));
   }
 
   // Setup NullDevices for raw HDD partition accesses
