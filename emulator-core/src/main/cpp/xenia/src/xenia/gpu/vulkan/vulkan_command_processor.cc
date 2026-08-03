@@ -343,6 +343,36 @@ bool VulkanCommandProcessor::SetupContext() {
         reinterpret_cast<PFN_vkCmdSetFragmentShadingRateKHR>(
             vulkan_device->vulkan_instance()->functions().vkGetDeviceProcAddr(
                 device, "vkCmdSetFragmentShadingRateKHR"));
+    auto get_rates = reinterpret_cast<
+        PFN_vkGetPhysicalDeviceFragmentShadingRatesKHR>(
+        vulkan_device->vulkan_instance()
+            ->functions()
+            .vkGetInstanceProcAddr(
+                vulkan_device->vulkan_instance()->instance(),
+                "vkGetPhysicalDeviceFragmentShadingRatesKHR"));
+    if (get_rates) {
+      uint32_t rate_count = 0;
+      get_rates(vulkan_device->physical_device(), &rate_count, nullptr);
+      std::vector<VkPhysicalDeviceFragmentShadingRateKHR> rates(
+          rate_count, {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR});
+      get_rates(vulkan_device->physical_device(), &rate_count, rates.data());
+      static const VkExtent2D kRateTable[] = {
+          {1, 1}, {2, 1}, {2, 2}, {4, 2}, {4, 4}};
+      for (const auto& r : rates) {
+        for (uint32_t i = 0; i < xe::countof(kRateTable); ++i) {
+          if (r.fragmentSize.width == kRateTable[i].width &&
+              r.fragmentSize.height == kRateTable[i].height) {
+            supported_shading_rate_samples_[i] = r.sampleCounts;
+          }
+        }
+      }
+      XELOGI(
+          "VRS rates by sample-count mask: 2x1={:#x} 2x2={:#x} 4x2={:#x} "
+          "4x4={:#x}",
+          supported_shading_rate_samples_[1], supported_shading_rate_samples_[2],
+          supported_shading_rate_samples_[3],
+          supported_shading_rate_samples_[4]);
+    }
   }
 
   // The unconditional inclusion of the vertex shader stage also covers the case
@@ -4451,10 +4481,23 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // and keep the native rate. Render-pass scoped, so emit only on a change.
   if (cvars::vulkan_vrs_blended > 0 && fragment_shading_rate_available() &&
       in_render_pass()) {
-    const uint32_t rate =
+    // 4x4 is single-sample only on Adreno; an unsupported rate would be
+    // silently clamped by the driver, so clamp here and report it.
+    const uint32_t sample_count = uint32_t(1)
+        << uint32_t(render_target_cache_->last_update_render_pass_key()
+                        .msaa_samples);
+    uint32_t rate =
         pipeline->dynamic_state.color_blend_enable[0]
             ? uint32_t(std::min(cvars::vulkan_vrs_blended, 4))
             : 0u;
+    rate = ClampShadingRate(rate, sample_count);
+    if (rate != uint32_t(std::min(cvars::vulkan_vrs_blended, 4)) &&
+        !vrs_clamp_reported_) {
+      vrs_clamp_reported_ = true;
+      XELOGW(
+          "VRS: requested rate {} unsupported at {} samples, using {}",
+          cvars::vulkan_vrs_blended, sample_count, rate);
+    }
     if (rate != current_shading_rate_) {
       static const VkExtent2D kRates[] = {
           {1, 1}, {2, 1}, {2, 2}, {4, 2}, {4, 4}};

@@ -205,6 +205,15 @@ class VulkanCommandProcessor final : public CommandProcessor {
   bool fragment_shading_rate_available() const {
     return vk_cmd_set_fragment_shading_rate_ != nullptr;
   }
+  // Highest rate index the device advertises for the sample count in use.
+  // 4x4 is single-sample only on Adreno, and an unsupported rate is silently
+  // clamped by the driver, so selections are pinned to what will really apply.
+  uint32_t ClampShadingRate(uint32_t rate, uint32_t sample_count) const {
+    while (rate > 0 && !(supported_shading_rate_samples_[rate] & sample_count)) {
+      --rate;
+    }
+    return rate;
+  }
   uint64_t GetCurrentSubmission() const {
     return completion_timeline_.GetUpcomingSubmission();
   }
@@ -1096,6 +1105,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   PFN_vkCmdSetFragmentShadingRateKHR vk_cmd_set_fragment_shading_rate_ =
       nullptr;
   uint32_t current_shading_rate_ = 0;
+  // Indexed like the rate table: 1x1, 2x1, 2x2, 4x2, 4x4.
+  uint32_t supported_shading_rate_samples_[5] = {~0u, 0, 0, 0, 0};
+  bool vrs_clamp_reported_ = false;
 
   // Currently bound graphics pipeline, either from the pipeline cache (with
   // potentially deferred creation - current_external_graphics_pipeline_ is
