@@ -191,6 +191,20 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   bool submission_open() const { return submission_open_; }
   bool in_render_pass() const { return in_render_pass_; }
+
+  // vkCmdSetFragmentShadingRateKHR is not in the generated device function
+  // tables, so it is resolved once at init and called through here.
+  void SetFragmentShadingRate(
+      VkCommandBuffer command_buffer, const VkExtent2D* fragment_size,
+      const VkFragmentShadingRateCombinerOpKHR combiner_ops[2]) const {
+    if (vk_cmd_set_fragment_shading_rate_) {
+      vk_cmd_set_fragment_shading_rate_(command_buffer, fragment_size,
+                                        combiner_ops);
+    }
+  }
+  bool fragment_shading_rate_available() const {
+    return vk_cmd_set_fragment_shading_rate_ != nullptr;
+  }
   uint64_t GetCurrentSubmission() const {
     return completion_timeline_.GetUpcomingSubmission();
   }
@@ -1079,6 +1093,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   const VulkanRenderTargetCache::Framebuffer* current_framebuffer_;
   // True when inside a render pass or dynamic rendering block.
   bool in_render_pass_ = false;
+  PFN_vkCmdSetFragmentShadingRateKHR vk_cmd_set_fragment_shading_rate_ =
+      nullptr;
+  uint32_t current_shading_rate_ = 1;
 
   // Currently bound graphics pipeline, either from the pipeline cache (with
   // potentially deferred creation - current_external_graphics_pipeline_ is

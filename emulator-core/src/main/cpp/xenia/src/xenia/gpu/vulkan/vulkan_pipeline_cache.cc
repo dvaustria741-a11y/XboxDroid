@@ -3488,6 +3488,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   pipeline_create_info.pNext =
       use_dynamic_rendering ? &pipeline_rendering_create_info : nullptr;
+  // Blanket rate, kept only for A/B against the per-draw path.
   if (cvars::vulkan_vrs_probe > 0 &&
       command_processor_.GetVulkanDevice()
           ->properties()

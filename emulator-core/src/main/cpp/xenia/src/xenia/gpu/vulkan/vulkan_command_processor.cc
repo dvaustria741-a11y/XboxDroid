@@ -54,6 +54,11 @@ DEFINE_int32(
     "GPU");
 UPDATE_from_int32(vulkan_mid_frame_submission_draws, 2026, 7, 24, 12, 0);
 
+DEFINE_int32(
+    vulkan_vrs_blended, 0,
+    "Shade blended draws at a coarse fragment rate: 0 off, 1 = 2x1, "
+    "2 = 2x2. Unblended geometry, UI and text keep the native rate.",
+    "Vulkan");
 DEFINE_bool(
     vulkan_cache_texture_descriptors, true,
     "Skip re-writing and re-binding the texture/sampler descriptor sets on "
@@ -330,6 +335,13 @@ bool VulkanCommandProcessor::SetupContext() {
   const VkDevice device = vulkan_device->device();
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       vulkan_device->properties();
+
+  if (device_properties.pipelineFragmentShadingRate) {
+    vk_cmd_set_fragment_shading_rate_ =
+        reinterpret_cast<PFN_vkCmdSetFragmentShadingRateKHR>(
+            vulkan_device->vulkan_instance()->functions().vkGetDeviceProcAddr(
+                device, "vkCmdSetFragmentShadingRateKHR"));
+  }
 
   // The unconditional inclusion of the vertex shader stage also covers the case
   // of manual index / factor buffer fetch (the system constants and the shared
@@ -3352,6 +3364,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 
 void VulkanCommandProcessor::EndRenderPass() {
   assert_true(submission_open_);
+  current_shading_rate_ = 1;
   if (!in_render_pass_) {
     return;
   }
@@ -4430,6 +4443,21 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
+
+  // Coarse shading for blended draws only: they are the bulk of the
+  // fragments in overdraw-heavy titles, while UI and text are not blended
+  // and keep the native rate. Render-pass scoped, so emit only on a change.
+  if (cvars::vulkan_vrs_blended > 0 && fragment_shading_rate_available() &&
+      in_render_pass()) {
+    const uint32_t rate = pipeline->dynamic_state.color_blend_enable[0]
+                              ? (cvars::vulkan_vrs_blended >= 2 ? 3u : 2u)
+                              : 1u;
+    if (rate != current_shading_rate_) {
+      deferred_command_buffer_.CmdVkSetFragmentShadingRate(
+          rate >= 2 ? 2u : 1u, rate >= 3 ? 2u : 1u);
+      current_shading_rate_ = rate;
+    }
+  }
 
   // Encode render-target transfers that the render target cache queued for
   // execution inside this draw's render pass (avoids breaking the pass on
