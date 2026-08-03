@@ -1108,6 +1108,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // Indexed like the rate table: 1x1, 2x1, 2x2, 4x2, 4x4.
   uint32_t supported_shading_rate_samples_[5] = {~0u, 0, 0, 0, 0};
   bool vrs_clamp_reported_ = false;
+  // total, no-extension, no-pass, not-blended, coarse, clamped
+  uint64_t vrs_hist_[6] = {};
+  uint64_t vrs_draws_seen_ = 0;
+  uint64_t vrs_draws_coarse_ = 0;
 
   // Currently bound graphics pipeline, either from the pipeline cache (with
   // potentially deferred creation - current_external_graphics_pipeline_ is

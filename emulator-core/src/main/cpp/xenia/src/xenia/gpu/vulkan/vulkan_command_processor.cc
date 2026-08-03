@@ -4479,6 +4479,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Coarse shading for blended draws only: they are the bulk of the
   // fragments in overdraw-heavy titles, while UI and text are not blended
   // and keep the native rate. Render-pass scoped, so emit only on a change.
+  if (cvars::vulkan_vrs_blended > 0) {
+    ++vrs_hist_[0];
+    if (!fragment_shading_rate_available()) {
+      ++vrs_hist_[1];
+    } else if (!in_render_pass()) {
+      ++vrs_hist_[2];
+    } else if (!pipeline->dynamic_state.color_blend_enable[0]) {
+      ++vrs_hist_[3];
+    } else {
+      ++vrs_hist_[4];
+    }
+    if ((vrs_hist_[0] % 20000) == 0) {
+      XELOGI(
+          "VkVrs: {} draws | no-extension {} | no-pass {} | not-blended {} "
+          "| COARSE {} | clamped {}",
+          vrs_hist_[0], vrs_hist_[1], vrs_hist_[2], vrs_hist_[3],
+          vrs_hist_[4], vrs_hist_[5]);
+    }
+  }
   if (cvars::vulkan_vrs_blended > 0 && fragment_shading_rate_available() &&
       in_render_pass()) {
     // 4x4 is single-sample only on Adreno; an unsupported rate would be
@@ -4491,12 +4510,23 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             ? uint32_t(std::min(cvars::vulkan_vrs_blended, 4))
             : 0u;
     rate = ClampShadingRate(rate, sample_count);
+    if (rate != uint32_t(std::min(cvars::vulkan_vrs_blended, 4))) {
+      ++vrs_hist_[5];
+    }
     if (rate != uint32_t(std::min(cvars::vulkan_vrs_blended, 4)) &&
         !vrs_clamp_reported_) {
       vrs_clamp_reported_ = true;
       XELOGW(
           "VRS: requested rate {} unsupported at {} samples, using {}",
           cvars::vulkan_vrs_blended, sample_count, rate);
+    }
+    ++vrs_draws_seen_;
+    vrs_draws_coarse_ += uint32_t(rate > 0);
+    if ((vrs_draws_seen_ % 20000) == 0) {
+      XELOGI("VRS: {} of {} draws coarse ({:.1f}%), requested rate {}",
+             vrs_draws_coarse_, vrs_draws_seen_,
+             vrs_draws_coarse_ * 100.0 / double(vrs_draws_seen_),
+             int32_t(cvars::vulkan_vrs_blended));
     }
     if (rate != current_shading_rate_) {
       static const VkExtent2D kRates[] = {
