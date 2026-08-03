@@ -55,9 +55,11 @@ DEFINE_int32(
 UPDATE_from_int32(vulkan_mid_frame_submission_draws, 2026, 7, 24, 12, 0);
 
 DEFINE_int32(
-    vulkan_vrs_blended, 0,
+    vulkan_vrs_blended, 1,
     "Shade blended draws at a coarse fragment rate: 0 off, 1 = 2x1, "
-    "2 = 2x2. Unblended geometry, UI and text keep the native rate.",
+    "2 = 2x2, 3 = 4x2, 4 = 4x4. Unblended geometry, UI and text keep "
+    "the native rate. Rates above 2x2 are clamped to what the device "
+    "reports as supported.",
     "Vulkan");
 DEFINE_bool(
     vulkan_cache_texture_descriptors, true,
@@ -3364,7 +3366,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 
 void VulkanCommandProcessor::EndRenderPass() {
   assert_true(submission_open_);
-  current_shading_rate_ = 1;
+  current_shading_rate_ = 0;
   if (!in_render_pass_) {
     return;
   }
@@ -4449,12 +4451,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // and keep the native rate. Render-pass scoped, so emit only on a change.
   if (cvars::vulkan_vrs_blended > 0 && fragment_shading_rate_available() &&
       in_render_pass()) {
-    const uint32_t rate = pipeline->dynamic_state.color_blend_enable[0]
-                              ? (cvars::vulkan_vrs_blended >= 2 ? 3u : 2u)
-                              : 1u;
+    const uint32_t rate =
+        pipeline->dynamic_state.color_blend_enable[0]
+            ? uint32_t(std::min(cvars::vulkan_vrs_blended, 4))
+            : 0u;
     if (rate != current_shading_rate_) {
+      static const VkExtent2D kRates[] = {
+          {1, 1}, {2, 1}, {2, 2}, {4, 2}, {4, 4}};
       deferred_command_buffer_.CmdVkSetFragmentShadingRate(
-          rate >= 2 ? 2u : 1u, rate >= 3 ? 2u : 1u);
+          kRates[rate].width, kRates[rate].height);
       current_shading_rate_ = rate;
     }
   }

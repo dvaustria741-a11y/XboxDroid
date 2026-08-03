@@ -111,7 +111,7 @@ object SettingDescriptions {
         "vulkan_async_skip_draws" to "Drop draws whose shaders are still compiling instead of waiting; brief pop-in instead of stutter",
         "vulkan_cache_texture_descriptors" to "Reuse texture/sampler descriptor sets across unchanged draws; disable to debug texture corruption",
         "vulkan_dynamic_pipeline_state" to "Use dynamic state for cull/depth/blend to cut pipeline permutations and shader-compile stutter",
-        "vulkan_vrs_blended" to "Shades blended effects at a coarser rate to save GPU time. Solid geometry, UI and text are untouched. 2x2 is the biggest gain, 2x1 is harder to notice",
+        "vulkan_vrs_blended" to "Shades blended effects at a coarser rate to save GPU time. Solid geometry, UI and text are untouched. Coarser rates are faster and blockier; 4x2 and above are only worth it if the effects still look acceptable",
         "vulkan_in_pass_resolve" to "Resolve EDRAM copies inside the render pass on tiled GPUs, avoiding a pass break per resolve",
         "vulkan_resolve_to_texture" to "Have in-pass resolves write the destination texture directly; needs the promote toggle, pairs with skip upload",
         "vulkan_resolve_to_texture_promote" to "Allocate resolve-target textures so a resolve can write them directly; costs framebuffer compression on those textures",

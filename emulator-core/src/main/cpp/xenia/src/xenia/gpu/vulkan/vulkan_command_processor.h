@@ -1095,7 +1095,7 @@ class VulkanCommandProcessor final : public CommandProcessor {
   bool in_render_pass_ = false;
   PFN_vkCmdSetFragmentShadingRateKHR vk_cmd_set_fragment_shading_rate_ =
       nullptr;
-  uint32_t current_shading_rate_ = 1;
+  uint32_t current_shading_rate_ = 0;
 
   // Currently bound graphics pipeline, either from the pipeline cache (with
   // potentially deferred creation - current_external_graphics_pipeline_ is

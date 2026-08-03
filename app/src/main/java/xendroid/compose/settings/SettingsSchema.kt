@@ -41,9 +41,10 @@ object SettingsSchema {
             // UI and text keep the native rate. Blended layers dominate the
             // fragment count in overdraw-heavy titles, so this trades detail
             // there for shading time.
-            l("Vulkan", "vulkan_vrs_blended", "Coarse shading for blended draws", "0",
+            l("Vulkan", "vulkan_vrs_blended", "Coarse shading for blended draws", "1",
                 "0" to "Off (native rate)", "1" to "2x1 (half)",
-                "2" to "2x2 (quarter)"),
+                "2" to "2x2 (quarter)", "3" to "4x2 (eighth)",
+                "4" to "4x4 (sixteenth)"),
             b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", true),
             b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
             b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),
