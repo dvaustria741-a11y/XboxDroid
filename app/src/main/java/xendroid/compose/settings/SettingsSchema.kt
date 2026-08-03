@@ -37,6 +37,13 @@ object SettingsSchema {
                 "" to "None (no TU_DEBUG flags, GMEM)", "sysmem" to "sysmem (untiled, slower)",
                 "sysmem,nolrz" to "sysmem + nolrz (LRZ off, perf diagnostic)",
                 "sysmem,noubwc" to "sysmem + noubwc (UBWC off, perf diagnostic)"),
+            // Coarse fragment shading for BLENDED draws only; unblended geometry,
+            // UI and text keep the native rate. Blended layers dominate the
+            // fragment count in overdraw-heavy titles, so this trades detail
+            // there for shading time.
+            l("Vulkan", "vulkan_vrs_blended", "Coarse shading for blended draws", "0",
+                "0" to "Off (native rate)", "1" to "2x1 (half)",
+                "2" to "2x2 (quarter)"),
             b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", true),
             b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
             b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),
