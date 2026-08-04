@@ -55,11 +55,25 @@ DEFINE_int32(
 UPDATE_from_int32(vulkan_mid_frame_submission_draws, 2026, 7, 24, 12, 0);
 
 DEFINE_int32(
-    vulkan_vrs_blended, 1,
-    "Shade blended draws at a coarse fragment rate: 0 off, 1 = 2x1, "
-    "2 = 2x2, 3 = 4x2, 4 = 4x4. Unblended geometry, UI and text keep "
-    "the native rate. Rates above 2x2 are clamped to what the device "
-    "reports as supported.",
+    vulkan_vrs_blended, 0,
+    "Shade selected draws at a coarse fragment rate: 0 off, 1 = 2x1, "
+    "2 = 2x2, 3 = 4x2, 4 = 4x4. Rates above 2x2 are clamped to what the "
+    "device reports as supported, which on Adreno means 2x2 on any "
+    "multisampled target.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_vrs_min_shader_dwords, 48,
+    "Skip coarse shading for draws whose pixel shader is smaller than this "
+    "many guest microcode dwords, roughly three per instruction. Trivial "
+    "shaders such as text and UI blits gain nothing from it. 0 disables the "
+    "check.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_vrs_scope, 0,
+    "Which draws coarse shading applies to: 0 every draw, 1 depth-tested "
+    "draws only, 2 blended draws only, 3 both. UI and text are kept sharp by "
+    "vulkan_vrs_min_shader_dwords, not by this; set both to 0 to coarsen "
+    "literally every draw.",
     "Vulkan");
 DEFINE_bool(
     vulkan_cache_texture_descriptors, true,
@@ -343,6 +357,11 @@ bool VulkanCommandProcessor::SetupContext() {
         reinterpret_cast<PFN_vkCmdSetFragmentShadingRateKHR>(
             vulkan_device->vulkan_instance()->functions().vkGetDeviceProcAddr(
                 device, "vkCmdSetFragmentShadingRateKHR"));
+    if (!vk_cmd_set_fragment_shading_rate_) {
+      XELOGW(
+          "Device reports pipelineFragmentShadingRate but provides no "
+          "vkCmdSetFragmentShadingRateKHR; coarse shading disabled");
+    }
     auto get_rates = reinterpret_cast<
         PFN_vkGetPhysicalDeviceFragmentShadingRatesKHR>(
         vulkan_device->vulkan_instance()
@@ -3396,7 +3415,9 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 
 void VulkanCommandProcessor::EndRenderPass() {
   assert_true(submission_open_);
-  current_shading_rate_ = 0;
+  // Sentinel, not 1x1: the rate is undefined at pass start, so the first
+  // draw of every pass must emit one.
+  current_shading_rate_ = UINT32_MAX;
   if (!in_render_pass_) {
     return;
   }
@@ -4476,57 +4497,60 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
 
-  // Coarse shading for blended draws only: they are the bulk of the
-  // fragments in overdraw-heavy titles, while UI and text are not blended
-  // and keep the native rate. Render-pass scoped, so emit only on a change.
-  if (cvars::vulkan_vrs_blended > 0) {
-    ++vrs_hist_[0];
-    if (!fragment_shading_rate_available()) {
-      ++vrs_hist_[1];
-    } else if (!in_render_pass()) {
-      ++vrs_hist_[2];
-    } else if (!pipeline->dynamic_state.color_blend_enable[0]) {
-      ++vrs_hist_[3];
-    } else {
-      ++vrs_hist_[4];
+  // Runs even at rate 0: pipelines declare the rate dynamic whenever the
+  // device supports it, so the state must always be set.
+  if (fragment_shading_rate_available() && in_render_pass()) {
+    // Depth testing separates world geometry from HUD, text and fullscreen
+    // post; an always-passing test is UI drawn with it on in name only.
+    const bool depth_tested =
+        pipeline->dynamic_state.depth_test_enable != VK_FALSE &&
+        pipeline->dynamic_state.depth_compare_op != VK_COMPARE_OP_ALWAYS;
+    const bool blended =
+        pipeline->dynamic_state.color_blend_enable[0] != VK_FALSE;
+    bool in_scope = true;
+    switch (cvars::vulkan_vrs_scope) {
+      case 1:
+        in_scope = depth_tested;
+        break;
+      case 2:
+        in_scope = blended;
+        break;
+      case 3:
+        in_scope = depth_tested && blended;
+        break;
+      default:
+        break;
     }
-    if ((vrs_hist_[0] % 20000) == 0) {
-      XELOGI(
-          "VkVrs: {} draws | no-extension {} | no-pass {} | not-blended {} "
-          "| COARSE {} | clamped {}",
-          vrs_hist_[0], vrs_hist_[1], vrs_hist_[2], vrs_hist_[3],
-          vrs_hist_[4], vrs_hist_[5]);
+    // Coarse shading only saves pixel shader work, so a trivial shader pays
+    // the blockiness for nothing. Render states alone could not separate these.
+    if (in_scope && cvars::vulkan_vrs_min_shader_dwords > 0) {
+      in_scope = pixel_shader != nullptr &&
+                 pixel_shader->ucode_dword_count() >=
+                     size_t(cvars::vulkan_vrs_min_shader_dwords);
     }
-  }
-  if (cvars::vulkan_vrs_blended > 0 && fragment_shading_rate_available() &&
-      in_render_pass()) {
-    // 4x4 is single-sample only on Adreno; an unsupported rate would be
-    // silently clamped by the driver, so clamp here and report it.
+    const uint32_t requested =
+        in_scope ? uint32_t(std::min(cvars::vulkan_vrs_blended, 4)) : 0u;
+    // On Adreno the wide rates are single-sample only.
     const uint32_t sample_count = uint32_t(1)
         << uint32_t(render_target_cache_->last_update_render_pass_key()
                         .msaa_samples);
-    uint32_t rate =
-        pipeline->dynamic_state.color_blend_enable[0]
-            ? uint32_t(std::min(cvars::vulkan_vrs_blended, 4))
-            : 0u;
-    rate = ClampShadingRate(rate, sample_count);
-    if (rate != uint32_t(std::min(cvars::vulkan_vrs_blended, 4))) {
-      ++vrs_hist_[5];
-    }
-    if (rate != uint32_t(std::min(cvars::vulkan_vrs_blended, 4)) &&
-        !vrs_clamp_reported_) {
+    const uint32_t rate = ClampShadingRate(requested, sample_count);
+    ++vrs_hist_[0];
+    vrs_hist_[1] += uint32_t(rate > 0);
+    vrs_hist_[2] += uint32_t(rate < requested && requested > 0);
+    vrs_hist_[3] += uint32_t(!depth_tested);
+    vrs_hist_[4] += uint32_t(depth_tested && !in_scope);
+    if (rate < requested && !vrs_clamp_reported_) {
       vrs_clamp_reported_ = true;
-      XELOGW(
-          "VRS: requested rate {} unsupported at {} samples, using {}",
-          cvars::vulkan_vrs_blended, sample_count, rate);
+      XELOGW("VRS: requested rate {} unsupported at {} samples, using {}",
+             requested, sample_count, rate);
     }
-    ++vrs_draws_seen_;
-    vrs_draws_coarse_ += uint32_t(rate > 0);
-    if ((vrs_draws_seen_ % 20000) == 0) {
-      XELOGI("VRS: {} of {} draws coarse ({:.1f}%), requested rate {}",
-             vrs_draws_coarse_, vrs_draws_seen_,
-             vrs_draws_coarse_ * 100.0 / double(vrs_draws_seen_),
-             int32_t(cvars::vulkan_vrs_blended));
+    if ((vrs_hist_[0] % 20000) == 0) {
+      XELOGI(
+          "VkVrs: {} draws | COARSE {} | clamped {} | not-depth-tested {} "
+          "| shader-too-small {}",
+          vrs_hist_[0], vrs_hist_[1], vrs_hist_[2], vrs_hist_[3],
+          vrs_hist_[4]);
     }
     if (rate != current_shading_rate_) {
       static const VkExtent2D kRates[] = {

@@ -3362,10 +3362,9 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   dynamic_states[dynamic_state.dynamicStateCount++] = VK_DYNAMIC_STATE_VIEWPORT;
   dynamic_states[dynamic_state.dynamicStateCount++] = VK_DYNAMIC_STATE_SCISSOR;
   // Without this the pipeline keeps a static 1x1 rate that overrides every
-  // vkCmdSetFragmentShadingRateKHR. Keyed off the command being loadable
-  // rather than the device property, which some drivers report without
-  // providing the entry point; declaring it dynamic with nothing setting it
-  // leaves the driver on undefined state.
+  // vkCmdSetFragmentShadingRateKHR. Keyed off the command being loadable, not
+  // the device property: some drivers report it without the entry point, and
+  // a dynamic state nothing sets leaves the driver on undefined state.
   if (command_processor_.fragment_shading_rate_available()) {
     dynamic_states[dynamic_state.dynamicStateCount++] =
         VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR;
