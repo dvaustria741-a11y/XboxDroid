@@ -71,6 +71,7 @@ import xendroid.compose.ui.theme.xendroidTheme
 import xendroid.compose.ui.controllers.ControllerSlotRow
 import xendroid.compose.ui.controllers.ControllerSlotsPanel
 import xendroid.compose.gamepad.ControllerRegistry
+import xendroid.compose.gamepad.RumbleDriver
 import xendroid.compose.gamepad.GamepadConfigDto
 import xendroid.compose.gamepad.GamepadController
 import xendroid.compose.gamepad.GamepadOverlay
@@ -89,6 +90,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     companion object {
         private const val TAG = "EmuHost"
         private const val KEYBOARD_POLL_MS = 150L
+        private const val RUMBLE_POLL_MS = 32L
         const val EXTRA_GAME_URI = "game_uri"   // keys must match GameLibraryViewModel
         const val EXTRA_DISC_LABELS = "disc_labels"
         const val EXTRA_DISC_PATHS = "disc_paths"
@@ -146,6 +148,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     @Volatile private var keyMap: Map<Int, Int> = GameButtons.DEFAULT_LOOKUP
     private var vibrator: Vibrator? = null
     private val controllers = ControllerRegistry(session)
+    private val rumble by lazy { RumbleDriver(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -400,6 +403,21 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                         }
                     }
 
+                    LaunchedEffect(booted) {
+                        if (!booted) return@LaunchedEffect
+                        try {
+                            while (isActive) {
+                                val state = session.vibrationState()
+                                if (state.isNotEmpty()) {
+                                    rumble.apply(state) { slot -> vibratorForSlot(slot) }
+                                }
+                                delay(RUMBLE_POLL_MS)
+                            }
+                        } finally {
+                            rumble.stopAll { slot -> vibratorForSlot(slot) }
+                        }
+                    }
+
                     val controllersOpen by controllersOpenState
                     if (controllersOpen) {
                         xendroidTheme {
@@ -508,6 +526,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun onPause() {
+        rumble.stopAll { slot -> vibratorForSlot(slot) }
         super.onPause()
         session.flushGpuCaches()
     }
@@ -576,6 +595,9 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         session.keyEvent(deviceSlotFor(event.deviceId), gameKey, false, KEY_VALUE_UNUSED)
         return true
     }
+
+    private fun vibratorForSlot(deviceSlot: Int) =
+        rumble.vibratorForDevice(controllers.androidDeviceIdFor(deviceSlot))
 
     private fun openControllers() {
         controllers.refresh()

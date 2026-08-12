@@ -99,6 +99,8 @@ object SettingsSchema {
 
         SettingsCategory("Controller", listOf(
             b("HID", "show_touch_overlay", "Show on-screen controller", true),
+            b("HID", "vibration", "Vibration", true),
+            i("HID", "vibration_level", "Vibration intensity", 100, 0, 100),
         )),
 
         SettingsCategory("HID", listOf(

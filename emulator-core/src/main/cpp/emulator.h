@@ -44,6 +44,7 @@ namespace ae{
     extern std::vector<input_device_entry> input_list_devices();
     extern bool input_bind_slot(int guest_slot,int device_slot);
     extern void input_unbind_slot(int guest_slot);
+    extern std::vector<uint16_t> input_vibration_state();
     extern bool is_running();
     extern bool is_paused();
     extern void pause();

@@ -49,6 +49,8 @@ namespace xe {
                     std::array<KeyStatus, kKeyCount> prev_key_status;
                     uint32_t key_status_mask = 0;
                     uint32_t packet_number = 1;
+                    uint16_t vibration_left = 0;
+                    uint16_t vibration_right = 0;
                 };
 
                 explicit AndroidInputDriver(xe::ui::Window* window, size_t window_z_order);
@@ -72,6 +74,7 @@ namespace xe {
                                  int8_t preferred_slot);
                 void DetachDevice(int device_slot);
                 void OnKey(int device_slot, int key_index, bool pressed, int value);
+                std::vector<uint16_t> VibrationState();
 
             private:
                 std::mutex devices_mutex_;

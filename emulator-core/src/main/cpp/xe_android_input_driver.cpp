@@ -87,8 +87,9 @@ namespace xe {
                 out_caps->gamepad.thumb_ly = (int16_t)0xFFFFu;
                 out_caps->gamepad.thumb_rx = (int16_t)0xFFFFu;
                 out_caps->gamepad.thumb_ry = (int16_t)0xFFFFu;
-                out_caps->vibration.left_motor_speed = 0;
-                out_caps->vibration.right_motor_speed = 0;
+                // Non-zero so titles that gate rumble on capabilities will send it.
+                out_caps->vibration.left_motor_speed = 0xFFFF;
+                out_caps->vibration.right_motor_speed = 0xFFFF;
                 return X_ERROR_SUCCESS;
             }
 
@@ -209,8 +210,25 @@ namespace xe {
                 if (user_index >= kMaxDevices || !devices_[user_index].present) {
                     return X_ERROR_DEVICE_NOT_CONNECTED;
                 }
+                if (vibration) {
+                    devices_[user_index].vibration_left = vibration->left_motor_speed;
+                    devices_[user_index].vibration_right = vibration->right_motor_speed;
+                }
 
                 return X_ERROR_SUCCESS;
+            }
+
+            std::vector<uint16_t> AndroidInputDriver::VibrationState() {
+                std::vector<uint16_t> out(kMaxDevices * 2, 0);
+                std::lock_guard<std::mutex> lock(devices_mutex_);
+                for (size_t i = 0; i < kMaxDevices; ++i) {
+                    if (!devices_[i].present) {
+                        continue;
+                    }
+                    out[i * 2] = devices_[i].vibration_left;
+                    out[i * 2 + 1] = devices_[i].vibration_right;
+                }
+                return out;
             }
 
             X_RESULT AndroidInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,X_INPUT_KEYSTROKE* out_keystroke) {
@@ -347,6 +365,8 @@ namespace xe {
                         return;
                     }
                     device.present = false;
+                    device.vibration_left = 0;
+                    device.vibration_right = 0;
                     // stable_id is kept so a reconnect reclaims this slot, and with
                     // it whatever guest slot the binding table holds for the id.
                     device.key_status = KeyTemplate();

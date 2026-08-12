@@ -485,6 +485,17 @@ static void j_input_unbind_slot(JNIEnv* env,jobject self,jint guest_slot){
     ae::input_unbind_slot(guest_slot);
 }
 
+static jintArray j_input_vibration_state(JNIEnv* env,jobject self){
+    const auto state=ae::input_vibration_state();
+    jintArray out=env->NewIntArray(jsize(state.size()));
+    if(!out || state.empty()){
+        return out;
+    }
+    std::vector<jint> values(state.begin(),state.end());
+    env->SetIntArrayRegion(out,0,jsize(values.size()),values.data());
+    return out;
+}
+
 static jobjectArray j_input_list_devices(JNIEnv* env,jobject self){
     const auto devices=ae::input_list_devices();
     jclass cls=env->FindClass("xendroid/emulator/Emulator$InputDeviceInfo");
@@ -549,6 +560,7 @@ int register_Emulator(JNIEnv* env){
             { "input_detach_device", "(I)V", (void *) j_input_detach_device },
             { "input_bind_slot", "(II)Z", (void *) j_input_bind_slot },
             { "input_unbind_slot", "(I)V", (void *) j_input_unbind_slot },
+            { "input_vibration_state", "()[I", (void *) j_input_vibration_state },
             { "input_list_devices", "()[Lxendroid/emulator/Emulator$InputDeviceInfo;", (void *) j_input_list_devices },
             { "quit", "()V", (void *) j_quit },
             { "is_running", "()Z", (void *) j_is_running },

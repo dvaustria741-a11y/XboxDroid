@@ -884,6 +884,14 @@ namespace ae{
         return false;
     }
 
+    std::vector<uint16_t> input_vibration_state(){
+        auto* driver=android_input_driver();
+        if(!driver){
+            return {};
+        }
+        return driver->VibrationState();
+    }
+
     void input_unbind_slot(int guest_slot){
         if(!android_input_driver() || guest_slot<0 || guest_slot>=xe::XUserMaxUserCount){
             return;

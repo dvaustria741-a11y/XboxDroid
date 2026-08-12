@@ -117,6 +117,8 @@ public class Emulator {
     public native boolean input_bind_slot(int guest_slot,int device_slot);
     public native void input_unbind_slot(int guest_slot);
     public native InputDeviceInfo[] input_list_devices();
+    /** Motor speeds per device slot as left/right pairs, 0-65535. */
+    public native int[] input_vibration_state();
 
     /** One attached pad and the guest slot it feeds; guest_slot -1 = unmapped. */
     public static class InputDeviceInfo{

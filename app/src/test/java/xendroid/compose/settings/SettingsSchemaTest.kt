@@ -13,20 +13,20 @@ class SettingsSchemaTest {
 
     private val all = SettingsSchema.allSettings
 
-    // 101 Bool + 12 IntRange + 21 ListChoice + 2 Action = 136. Display|host_present_from_non_ui_thread
+    // 102 Bool + 13 IntRange + 21 ListChoice + 2 Action = 138. Display|host_present_from_non_ui_thread
     // is intentionally absent (forced true natively; not a valid user choice).
-    @Test fun total_entry_count_is_136() {
-        assertEquals(136, all.size)
+    @Test fun total_entry_count_is_138() {
+        assertEquals(138, all.size)
         assertEquals(
-            136,
+            138,
             all.count { it is Setting.Bool } + all.count { it is Setting.IntRange } +
                 all.count { it is Setting.ListChoice } + all.count { it is Setting.Action },
         )
     }
 
     @Test fun counts_by_type_match_verified_inventory() {
-        assertEquals(101, all.count { it is Setting.Bool })
-        assertEquals(12, all.count { it is Setting.IntRange })
+        assertEquals(102, all.count { it is Setting.Bool })
+        assertEquals(13, all.count { it is Setting.IntRange })
         assertEquals(21, all.count { it is Setting.ListChoice })
         assertEquals(2, all.count { it is Setting.Action })
     }

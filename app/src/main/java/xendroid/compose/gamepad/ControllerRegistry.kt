@@ -60,6 +60,10 @@ class ControllerRegistry(private val session: EmulatorSession) {
         inputManager = null
     }
 
+    /** Null for the on-screen overlay, whose rumble belongs to the phone itself. */
+    fun androidDeviceIdFor(deviceSlot: Int): Int? =
+        pads.entries.firstOrNull { it.value.deviceSlot == deviceSlot }?.key
+
     /** Attach is a no-op once a device is known, and retried while boot is pending. */
     fun refresh() {
         InputDevice.getDeviceIds().forEach { padFor(it) }

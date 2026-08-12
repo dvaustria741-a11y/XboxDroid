@@ -106,6 +106,12 @@ class EmulatorSession {
         runCatching { core.input_unbind_slot(guestSlot) }
     }
 
+    fun vibrationState(): IntArray {
+        if (!booted) return IntArray(0)
+        return runCatching { core.input_vibration_state() ?: IntArray(0) }
+            .getOrDefault(IntArray(0))
+    }
+
     fun listInputDevices(): List<xendroid.emulator.Emulator.InputDeviceInfo> {
         if (!booted) return emptyList()
         return runCatching { core.input_list_devices()?.toList() ?: emptyList() }
