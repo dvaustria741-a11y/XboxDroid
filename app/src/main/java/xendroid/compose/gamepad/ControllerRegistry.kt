@@ -2,7 +2,9 @@ package xendroid.compose.gamepad
 
 import android.content.Context
 import android.hardware.input.InputManager
+import android.util.Log
 import android.view.InputDevice
+import android.view.MotionEvent
 import xendroid.compose.core.EmulatorSession
 
 /**
@@ -16,8 +18,6 @@ class ControllerRegistry(private val session: EmulatorSession) {
     class PadState(val deviceSlot: Int) {
         val axisPressed = BooleanArray(24)
         val axisValue = IntArray(24) { Int.MIN_VALUE }
-        var lTriggerDown = false
-        var rTriggerDown = false
         var hatLeft = false
         var hatUp = false
         var hatRight = false
@@ -80,6 +80,7 @@ class ControllerRegistry(private val session: EmulatorSession) {
         val stableId = device.descriptor ?: "android-pad-$deviceId"
         val slot = session.attachInputDevice(stableId, device.name ?: "Controller", SUBTYPE_GAMEPAD, -1)
         if (slot < 0) return null
+        logAxes(device, slot)
         val state = PadState(slot)
         pads[deviceId] = state
         // First physical pad takes player 1 from the overlay, which would
@@ -99,6 +100,16 @@ class ControllerRegistry(private val session: EmulatorSession) {
         }
     }
 
+    /** Which axes a pad publishes decides whether its triggers arrive as
+     *  LTRIGGER/BRAKE or as Z/RZ (which we treat as the right stick). */
+    private fun logAxes(device: InputDevice, slot: Int) {
+        val axes = device.motionRanges.joinToString(", ") { range ->
+            "${MotionEvent.axisToString(range.axis)}[${range.min}..${range.max} flat=${range.flat}]"
+        }
+        Log.i(TAG, "pad slot=$slot '${device.name}' id=${device.id} descriptor=${device.descriptor} " +
+            "sources=0x${Integer.toHexString(device.sources)} axes: $axes")
+    }
+
     private fun isGamepad(device: InputDevice): Boolean {
         val sources = device.sources
         return sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
@@ -106,6 +117,7 @@ class ControllerRegistry(private val session: EmulatorSession) {
     }
 
     private companion object {
+        const val TAG = "XenDroidPads"
         const val TOUCH_ID = "android-touch"
         const val SUBTYPE_GAMEPAD = 0x01
     }

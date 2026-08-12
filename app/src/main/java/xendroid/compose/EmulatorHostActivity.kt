@@ -91,6 +91,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val TAG = "EmuHost"
         private const val KEYBOARD_POLL_MS = 150L
         private const val RUMBLE_POLL_MS = 32L
+        private const val TRIGGER_DEADZONE = 0.02f
         const val EXTRA_GAME_URI = "game_uri"   // keys must match GameLibraryViewModel
         const val EXTRA_DISC_LABELS = "disc_labels"
         const val EXTRA_DISC_PATHS = "disc_paths"
@@ -661,20 +662,21 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             negKey = KC_RTHUMB_UP, posKey = KC_RTHUMB_DOWN, invert = true)
         // Most pads report triggers as ANALOG axes (LTRIGGER/RTRIGGER, or BRAKE/GAS). Emit a
         // press past the threshold, edge-detected so we don't spam.
-        pad.lTriggerDown = emitTrigger(pad,
+        emitTrigger(pad,
             maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)),
-            KC_TRIGGER_L, pad.lTriggerDown)
-        pad.rTriggerDown = emitTrigger(pad,
+            KC_TRIGGER_L)
+        emitTrigger(pad,
             maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)),
-            KC_TRIGGER_R, pad.rTriggerDown)
+            KC_TRIGGER_R)
         return true
     }
 
-    /** Analog trigger -> digital game key. Emits only on the down/up edge (>0.5 = down). */
-    private fun emitTrigger(pad: ControllerRegistry.PadState, value: Float, gameKey: Int, wasDown: Boolean): Boolean {
-        val down = value > 0.5f
-        if (down != wasDown) session.keyEvent(pad.deviceSlot, gameKey, down, KEY_VALUE_UNUSED)
-        return down
+    /** Analog trigger -> the guest's 0-255 trigger byte. Thresholding it to a
+     *  button threw away the whole travel range. */
+    private fun emitTrigger(pad: ControllerRegistry.PadState, value: Float, gameKey: Int) {
+        val v = if (value < TRIGGER_DEADZONE) 0f else value
+        val scaled = (v * 255f).toInt().coerceIn(0, 255)
+        emitAxis(pad, gameKey, scaled > 0, scaled)
     }
 
     /** For one axis emit the opposing thumb directions, scaled to signed-short range.

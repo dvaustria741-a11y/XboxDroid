@@ -158,11 +158,15 @@ namespace xe {
                             case ui::VirtualKey::kXInputPadRShoulder:
                                 buttons |= 0x0200;  // XINPUT_GAMEPAD_RIGHT_SHOULDER
                                 break;
+                            // value < 0 means a digital press (on-screen pad), which
+                            // is full deflection; a physical trigger sends 0-255.
                             case ui::VirtualKey::kXInputPadLTrigger:
-                                left_trigger = 0xFF;
+                                left_trigger = ks.value < 0 ? 0xFF
+                                                            : uint8_t(ks.value > 0xFF ? 0xFF : ks.value);
                                 break;
                             case ui::VirtualKey::kXInputPadRTrigger:
-                                right_trigger = 0xFF;
+                                right_trigger = ks.value < 0 ? 0xFF
+                                                             : uint8_t(ks.value > 0xFF ? 0xFF : ks.value);
                                 break;
                             case ui::VirtualKey::kXInputPadLThumbLeft:
                                 thumb_lx =ks.value;//+= SHRT_MIN;
