@@ -60,6 +60,7 @@ import xendroid.compose.ui.disc.DiscSwapPanel
 import xendroid.compose.ui.keyboard.GuestKeyboardPanel
 import xendroid.compose.ui.keyboard.clampToUtf16Units
 import xendroid.compose.ui.messagebox.GuestMessageBoxPanel
+import xendroid.compose.ui.pause.PAUSE_OPTION_CONTROLLERS
 import xendroid.compose.ui.pause.PAUSE_OPTION_COUNT
 import xendroid.compose.settings.ConfigStore
 import xendroid.compose.ui.pause.PAUSE_OPTION_QUIT
@@ -67,6 +68,9 @@ import xendroid.compose.ui.pause.PAUSE_OPTION_TOUCH_OVERLAY
 import xendroid.compose.ui.pause.PAUSE_OPTION_RESUME
 import xendroid.compose.ui.pause.PauseMenuPanel
 import xendroid.compose.ui.theme.xendroidTheme
+import xendroid.compose.ui.controllers.ControllerSlotRow
+import xendroid.compose.ui.controllers.ControllerSlotsPanel
+import xendroid.compose.gamepad.ControllerRegistry
 import xendroid.compose.gamepad.GamepadConfigDto
 import xendroid.compose.gamepad.GamepadController
 import xendroid.compose.gamepad.GamepadOverlay
@@ -134,14 +138,14 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val messageBoxRequestState =
         mutableStateOf<Emulator.MessageBoxRequest?>(null)
     private val panelSelectedState = mutableIntStateOf(0)
+    private val controllersOpenState = mutableStateOf(false)
+    private val controllerRowsState = mutableStateOf<List<ControllerSlotRow>>(emptyList())
     private val keyboardTextState = mutableStateOf("")
 
     // Falls back to GameButtons.DEFAULT_LOOKUP until KeymapStore loads in onCreate.
     @Volatile private var keyMap: Map<Int, Int> = GameButtons.DEFAULT_LOOKUP
     private var vibrator: Vibrator? = null
-    // Edge-detect state for analog triggers reported as axes.
-    private var lTriggerDown = false
-    private var rTriggerDown = false
+    private val controllers = ControllerRegistry(session)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -150,6 +154,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         // Keep the launcher out of the cached band so lmkd stops reaping it mid-game, and
         // notice if the main process dies anyway.
         EmuProcessLink.bindToMainProcess(this)
+
+        controllers.start(this)
 
         val gameUri = FrontendLaunch.resolveGamePath(this, intent)
         if (gameUri.isNullOrEmpty()) {
@@ -289,7 +295,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                             onUserInteraction = poke,
                             onKeyEvent = { kc, pressed, v ->
                                 if (pressed && v == Kc.VALUE_UNUSED) maybeVibrate()
-                                session.keyEvent(kc, pressed, v)
+                                session.keyEvent(controllers.touchSlot(), kc, pressed, v)
                             },
                             modifier = Modifier.fillMaxSize(),
                         )
@@ -393,6 +399,19 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                             )
                         }
                     }
+
+                    val controllersOpen by controllersOpenState
+                    if (controllersOpen) {
+                        xendroidTheme {
+                            ControllerSlotsPanel(
+                                devices = controllerRowsState.value,
+                                selected = panelSelectedState.intValue,
+                                onCycleSlot = { row -> cycleControllerSlot(row) },
+                                onClose = { closeControllers() },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
                 }
 
                 // Back / swipe-back PAUSES the game and opens a Quit menu instead of leaving to
@@ -420,6 +439,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                         selected = panelSelectedState.intValue,
                         touchOverlayShown = showTouchOverlay.value == true,
                         onToggleTouchOverlay = { toggleTouchOverlay() },
+                        onControllers = {
+                            menuOpenState.value = false
+                            openControllers()
+                        },
                         onResume = { closeMenuAndResume() },
                         onQuit = { finish() },
                         modifier = Modifier.fillMaxSize(),
@@ -514,6 +537,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         super.onDestroy()
+        controllers.stop()
         // A pending prompt must not hold a dispatch thread through teardown.
         keyboardRequestState.value = null
         session.keyboardCancelAll()
@@ -537,7 +561,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         val gameKey = keyMap[keyCode]
             ?: return consumeIfGamepad(event) || super.onKeyDown(keyCode, event)
         if (event.repeatCount == 0) {
-            session.keyEvent(gameKey, true, KEY_VALUE_UNUSED)
+            session.keyEvent(deviceSlotFor(event.deviceId), gameKey, true, KEY_VALUE_UNUSED)
             return true
         }
         return super.onKeyDown(keyCode, event)            // ignore auto-repeats
@@ -549,9 +573,39 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         val gameKey = keyMap[keyCode]
             ?: return consumeIfGamepad(event) || super.onKeyUp(keyCode, event)
-        session.keyEvent(gameKey, false, KEY_VALUE_UNUSED)
+        session.keyEvent(deviceSlotFor(event.deviceId), gameKey, false, KEY_VALUE_UNUSED)
         return true
     }
+
+    private fun openControllers() {
+        controllers.refresh()
+        refreshControllerRows()
+        panelSelectedState.intValue = 0
+        controllersOpenState.value = true
+        if (session.booted) session.pause()
+    }
+
+    private fun closeControllers() {
+        controllersOpenState.value = false
+        if (session.booted) session.resumeIfPaused()
+    }
+
+    private fun refreshControllerRows() {
+        controllerRowsState.value = session.listInputDevices().map { device ->
+            ControllerSlotRow(device.device_slot, device.display_name ?: "Controller", device.guest_slot)
+        }
+    }
+
+    /** Wraps past player 4 to unmapped. */
+    private fun cycleControllerSlot(row: ControllerSlotRow) {
+        val next = if (row.guestSlot in 0..2) row.guestSlot + 1 else if (row.guestSlot == 3) -1 else 0
+        if (next < 0) session.unbindInputSlot(row.guestSlot) else session.bindInputSlot(next, row.deviceSlot)
+        refreshControllerRows()
+    }
+
+    /** Keyboards and remotes keep feeding the overlay's slot. */
+    private fun deviceSlotFor(deviceId: Int): Int =
+        controllers.padFor(deviceId)?.deviceSlot ?: controllers.touchSlot()
 
     /** Consumes unmapped controller buttons (never BACK): unhandled gamepad input is what
      *  OEM overlays latch onto. */
@@ -569,97 +623,90 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             panelHat(nav, event)
             return true
         }
+        val pad = controllers.padFor(event.deviceId) ?: return super.onGenericMotionEvent(event)
         // No early return: sticks/triggers must still process while a hat is held.
-        val hatHandled = isNonDpadSource(event) && handleHat(event)
+        val hatHandled = isNonDpadSource(event) && handleHat(pad, event)
         if (event.source and InputDevice.SOURCE_JOYSTICK != InputDevice.SOURCE_JOYSTICK) {
             return hatHandled || super.onGenericMotionEvent(event)
         }
-        emitAxisPair(event.getAxisValue(MotionEvent.AXIS_X),
+        emitAxisPair(pad, event.getAxisValue(MotionEvent.AXIS_X),
             negKey = KC_LTHUMB_LEFT, posKey = KC_LTHUMB_RIGHT, invert = false)
-        emitAxisPair(event.getAxisValue(MotionEvent.AXIS_Y),
+        emitAxisPair(pad, event.getAxisValue(MotionEvent.AXIS_Y),
             negKey = KC_LTHUMB_UP, posKey = KC_LTHUMB_DOWN, invert = true)
-        emitAxisPair(event.getAxisValue(MotionEvent.AXIS_Z),
+        emitAxisPair(pad, event.getAxisValue(MotionEvent.AXIS_Z),
             negKey = KC_RTHUMB_LEFT, posKey = KC_RTHUMB_RIGHT, invert = false)
-        emitAxisPair(event.getAxisValue(MotionEvent.AXIS_RZ),
+        emitAxisPair(pad, event.getAxisValue(MotionEvent.AXIS_RZ),
             negKey = KC_RTHUMB_UP, posKey = KC_RTHUMB_DOWN, invert = true)
         // Most pads report triggers as ANALOG axes (LTRIGGER/RTRIGGER, or BRAKE/GAS). Emit a
         // press past the threshold, edge-detected so we don't spam.
-        lTriggerDown = emitTrigger(
+        pad.lTriggerDown = emitTrigger(pad,
             maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)),
-            KC_TRIGGER_L, lTriggerDown)
-        rTriggerDown = emitTrigger(
+            KC_TRIGGER_L, pad.lTriggerDown)
+        pad.rTriggerDown = emitTrigger(pad,
             maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)),
-            KC_TRIGGER_R, rTriggerDown)
+            KC_TRIGGER_R, pad.rTriggerDown)
         return true
     }
 
     /** Analog trigger -> digital game key. Emits only on the down/up edge (>0.5 = down). */
-    private fun emitTrigger(value: Float, gameKey: Int, wasDown: Boolean): Boolean {
+    private fun emitTrigger(pad: ControllerRegistry.PadState, value: Float, gameKey: Int, wasDown: Boolean): Boolean {
         val down = value > 0.5f
-        if (down != wasDown) session.keyEvent(gameKey, down, KEY_VALUE_UNUSED)
+        if (down != wasDown) session.keyEvent(pad.deviceSlot, gameKey, down, KEY_VALUE_UNUSED)
         return down
     }
 
     /** For one axis emit the opposing thumb directions, scaled to signed-short range.
      *  invert flips sign first (screen Y is up-negative; X360 up is positive). */
-    private fun emitAxisPair(axis: Float, negKey: Int, posKey: Int, invert: Boolean) {
+    private fun emitAxisPair(pad: ControllerRegistry.PadState, axis: Float, negKey: Int, posKey: Int, invert: Boolean) {
         val raw = if (invert) -axis else axis
         // Snap to exactly zero so emitAxis' equality check can match.
         val v = if (abs(raw) < AXIS_DEADZONE) 0f else raw
         when {
             v < 0f -> {
-                emitAxis(posKey, false, 0)
-                emitAxis(negKey, true, (v * 32768f).toInt())
+                emitAxis(pad, posKey, false, 0)
+                emitAxis(pad, negKey, true, (v * 32768f).toInt())
             }
             v > 0f -> {
-                emitAxis(negKey, false, 0)
-                emitAxis(posKey, true, (v * 32767f).toInt())
+                emitAxis(pad, negKey, false, 0)
+                emitAxis(pad, posKey, true, (v * 32767f).toInt())
             }
             else -> {
-                emitAxis(negKey, false, 0)
-                emitAxis(posKey, false, 0)
+                emitAxis(pad, negKey, false, 0)
+                emitAxis(pad, posKey, false, 0)
             }
         }
     }
 
-    // Last value pushed per analog code: motion events arrive per sample (~120Hz x 4 axes)
-    // and mostly repeat, so without this every sample costs ~10 JNI calls.
-    private val axisPressed = BooleanArray(24)
-    private val axisValue = IntArray(24) { Int.MIN_VALUE }
-
-    private fun emitAxis(code: Int, pressed: Boolean, value: Int) {
-        if (axisPressed[code] == pressed && axisValue[code] == value) return
-        axisPressed[code] = pressed
-        axisValue[code] = value
-        session.keyEvent(code, pressed, value)
+    // Last value pushed per analog code (per pad): motion events arrive per sample
+    // (~120Hz x 4 axes) and mostly repeat, so without this every sample costs ~10 JNI calls.
+    private fun emitAxis(pad: ControllerRegistry.PadState, code: Int, pressed: Boolean, value: Int) {
+        if (pad.axisPressed[code] == pressed && pad.axisValue[code] == value) return
+        pad.axisPressed[code] = pressed
+        pad.axisValue[code] = value
+        session.keyEvent(pad.deviceSlot, code, pressed, value)
     }
 
-    // Hat D-pad state, edge-detected: the hat only releases what IT pressed, so it can't
-    // clobber a D-pad held via real KEYCODE_DPAD_* key events.
-    private var hatLeft = false
-    private var hatUp = false
-    private var hatRight = false
-    private var hatDown = false
-
-    /** Hat axes -> D-pad; thresholds, not ==+-1f (some pads are inexact). */
-    private fun handleHat(event: MotionEvent): Boolean {
+    /** Hat axes -> D-pad; thresholds, not ==+-1f (some pads are inexact). Edge-detected per
+     *  pad: the hat only releases what IT pressed, so it can't clobber a D-pad held via real
+     *  KEYCODE_DPAD_* key events. */
+    private fun handleHat(pad: ControllerRegistry.PadState, event: MotionEvent): Boolean {
         val hx = event.getAxisValue(MotionEvent.AXIS_HAT_X)
         val hy = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
         val left = hx < -0.5f
         val right = hx > 0.5f
         val up = hy < -0.5f
         val down = hy > 0.5f
-        if (left != hatLeft) {
-            session.keyEvent(KC_DPAD_LEFT, left, KEY_VALUE_UNUSED); hatLeft = left
+        if (left != pad.hatLeft) {
+            session.keyEvent(pad.deviceSlot, KC_DPAD_LEFT, left, KEY_VALUE_UNUSED); pad.hatLeft = left
         }
-        if (right != hatRight) {
-            session.keyEvent(KC_DPAD_RIGHT, right, KEY_VALUE_UNUSED); hatRight = right
+        if (right != pad.hatRight) {
+            session.keyEvent(pad.deviceSlot, KC_DPAD_RIGHT, right, KEY_VALUE_UNUSED); pad.hatRight = right
         }
-        if (up != hatUp) {
-            session.keyEvent(KC_DPAD_UP, up, KEY_VALUE_UNUSED); hatUp = up
+        if (up != pad.hatUp) {
+            session.keyEvent(pad.deviceSlot, KC_DPAD_UP, up, KEY_VALUE_UNUSED); pad.hatUp = up
         }
-        if (down != hatDown) {
-            session.keyEvent(KC_DPAD_DOWN, down, KEY_VALUE_UNUSED); hatDown = down
+        if (down != pad.hatDown) {
+            session.keyEvent(pad.deviceSlot, KC_DPAD_DOWN, down, KEY_VALUE_UNUSED); pad.hatDown = down
         }
         return left || right || up || down
     }
@@ -680,6 +727,13 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     )
 
     private fun panelNav(): PanelNav? {
+        if (controllersOpenState.value) {
+            val rows = controllerRowsState.value
+            // Close is the last option.
+            return PanelNav(rows.size + 1,
+                { i -> if (i < rows.size) cycleControllerSlot(rows[i]) else closeControllers() },
+                { closeControllers() })
+        }
         discRequestState.value?.let { req ->
             val paths = req.discPaths ?: emptyArray()
             val discs = minOf(req.discLabels?.size ?: 0, paths.size)
@@ -705,6 +759,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                     when (i) {
                         PAUSE_OPTION_QUIT -> finish()
                         PAUSE_OPTION_TOUCH_OVERLAY -> toggleTouchOverlay()
+                        PAUSE_OPTION_CONTROLLERS -> {
+                            menuOpenState.value = false
+                            openControllers()
+                        }
                         else -> closeMenuAndResume()
                     }
                 },
