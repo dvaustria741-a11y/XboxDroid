@@ -98,7 +98,7 @@ fun ProfilesScreen(
                     } else {
                         ProfileList(
                             profiles = s.profiles,
-                            onSelect = vm::setActive,
+                            onAssign = vm::assignSlot,
                             onRename = { editing = Editing.Rename(it) },
                             onDelete = { deleteTarget = it },
                         )
@@ -169,22 +169,51 @@ fun ProfilesScreen(
 @Composable
 private fun ProfileList(
     profiles: List<ProfileEntry>,
-    onSelect: (String) -> Unit,
+    onAssign: (Int, String) -> Unit,
     onRename: (ProfileEntry) -> Unit,
     onDelete: (ProfileEntry) -> Unit,
 ) {
     LazyColumn(Modifier.fillMaxSize()) {
         items(profiles, key = { it.xuid }) { p ->
+            var slotMenu by remember(p.xuid) { mutableStateOf(false) }
             ListItem(
                 leadingContent = { ProfileAvatar(p) },
                 headlineContent = {
                     Text(p.gamertag.ifBlank { p.xuid },
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
-                supportingContent = if (p.isActive) ({ Text("Active") }) else null,
+                supportingContent = {
+                    Text(p.slot?.let { "Player ${it + 1}" } ?: "Not signed in")
+                },
                 trailingContent = { RowMenu(p, onRename, onDelete) },
-                modifier = Modifier.clickable { onSelect(p.xuid) },
+                modifier = Modifier.clickable { slotMenu = true },
             )
+            Box {
+                DropdownMenu(expanded = slotMenu, onDismissRequest = { slotMenu = false }) {
+                    for (slot in 0 until ProfileManagerViewModel.SLOT_COUNT) {
+                        DropdownMenuItem(
+                            text = { Text("Sign in as player ${slot + 1}") },
+                            trailingIcon = if (p.slot == slot) ({
+                                Icon(Icons.Default.CheckCircle, contentDescription = null)
+                            }) else null,
+                            onClick = {
+                                slotMenu = false
+                                onAssign(slot, p.xuid)
+                            },
+                        )
+                    }
+                    if (p.slot != null) {
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text("Sign out") },
+                            onClick = {
+                                slotMenu = false
+                                onAssign(p.slot, "")
+                            },
+                        )
+                    }
+                }
+            }
             HorizontalDivider()
         }
     }
