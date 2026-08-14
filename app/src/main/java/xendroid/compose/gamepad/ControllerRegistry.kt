@@ -67,6 +67,9 @@ class ControllerRegistry(private val session: EmulatorSession) {
     fun androidDeviceIdFor(deviceSlot: Int): Int? =
         pads.entries.firstOrNull { it.value.deviceSlot == deviceSlot }?.key
 
+    /** Lowest driver slot held by a physical pad, -1 with none attached. */
+    fun firstPadSlot(): Int = pads.values.minOfOrNull { it.deviceSlot } ?: -1
+
     /** Attach is a no-op once a device is known, and retried while boot is pending. */
     fun refresh() {
         InputDevice.getDeviceIds().forEach { padFor(it) }

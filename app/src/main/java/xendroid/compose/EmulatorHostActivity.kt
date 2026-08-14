@@ -583,8 +583,13 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         return true
     }
 
+    // Only the first pad may claim the console's own motor, so a second motorless
+    // pad cannot buzz the handheld on player 1's behalf.
     private fun vibratorForSlot(deviceSlot: Int) =
-        rumble.vibratorForDevice(controllers.androidDeviceIdFor(deviceSlot))
+        rumble.vibratorForDevice(
+            controllers.androidDeviceIdFor(deviceSlot),
+            fallbackToSystem = deviceSlot == controllers.firstPadSlot(),
+        )
 
 
 
