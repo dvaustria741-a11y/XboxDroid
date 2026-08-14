@@ -64,6 +64,8 @@ object SettingDescriptions {
         "kernel_cert_monitor" to "Reports the certification monitor as present to the game (debug/testing feature)",
         "kernel_debug_monitor" to "Reports a debug monitor (remote debugger) as attached to the game",
         "kernel_display_gamma_type" to "Display gamma curve reported to games; BT.709 best matches a 360 on an HDTV",
+        "ask_players_on_start" to "Asks which profile each controller plays as when more " +
+            "than one controller is connected",
         "network_enabled" to "Lets games open network sockets. They cannot reach a real peer, but " +
             "some games crash when socket creation fails. Turn off only for a game that hangs online",
         "kernel_pix" to "Exposes the PIX GPU profiler interface to the game for debug captures",
