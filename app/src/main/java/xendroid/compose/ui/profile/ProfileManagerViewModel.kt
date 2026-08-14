@@ -13,6 +13,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import xendroid.compose.core.ContentPaths
+import xendroid.compose.gamepad.GamepadDevice
+import xendroid.compose.gamepad.PadProfiles
+import xendroid.compose.gamepad.PlayerSetup
+import xendroid.compose.gamepad.connectedGamepads
 import xendroid.compose.core.EmulatorRuntime
 import xendroid.compose.core.Gamertag
 import xendroid.compose.core.ProfilePaths
@@ -32,6 +36,11 @@ class ProfileManagerViewModel(
         val hasAvatar: Boolean,
         /** Slot 0 is player 1. */
         val slot: Int?,
+        /** Connected controller playing as this profile, null for none. */
+        val controller: GamepadDevice? = null,
+        /** True when [controller] was attached by hand rather than inferred from
+         *  the player slot. Only an attached one can be detached. */
+        val controllerAttached: Boolean = false,
     ) {
         val isActive: Boolean get() = slot != null
     }
@@ -73,15 +82,19 @@ class ProfileManagerViewModel(
             val root = ContentPaths.contentRoot().absolutePath
             try {
                 val slots = slotXuids()
+                val padsBySlot = PlayerSetup.orderedPads(appContext)
                 val profiles = emu.list_profiles(root)?.map { info ->
+                    val slot = slots.indexOfFirst { it.equals(info.xuid, ignoreCase = true) }
+                        .takeIf { it >= 0 }
                     ProfileEntry(
                         xuid = info.xuid,
                         gamertag = info.gamertag ?: "",
                         language = info.language,
                         country = info.country,
                         hasAvatar = info.hasAvatar,
-                        slot = slots.indexOfFirst { it.equals(info.xuid, ignoreCase = true) }
-                            .takeIf { it >= 0 },
+                        slot = slot,
+                        controller = controllerFor(info.xuid, slot, padsBySlot),
+                        controllerAttached = PadProfiles.padFor(appContext, info.xuid) != null,
                     )
                 }?.sortedBy { it.gamertag.lowercase() }
                     ?: return@withContext ListState.Error("Couldn't read profiles.")
@@ -176,6 +189,36 @@ class ProfileManagerViewModel(
             _opState.value = OpState.Failed("Couldn't remove the profile.")
         }
     }
+
+    /** The pad playing as this profile: the one attached to it, else whichever
+     *  pad drives the player slot it is signed in to - the signed-in profile has a
+     *  controller whether or not anyone attached one by hand. A pad already
+     *  attached to some other profile never stands in. */
+    private fun controllerFor(
+        xuid: String,
+        slot: Int?,
+        padsBySlot: List<GamepadDevice>,
+    ): GamepadDevice? {
+        PadProfiles.padFor(appContext, xuid)?.let { return it }
+        val pad = slot?.let { padsBySlot.getOrNull(it) } ?: return null
+        return pad.takeIf { PadProfiles.choiceFor(appContext, it.descriptor) == null }
+    }
+
+    /** One controller per profile and one profile per controller, so attaching
+     *  takes the pad off whatever it was playing as. */
+    fun attachController(xuid: String, descriptor: String?) = viewModelScope.launch {
+        withContext(Dispatchers.IO) {
+            connectedGamepads().forEach { pad ->
+                if (PadProfiles.choiceFor(appContext, pad.descriptor).equals(xuid, true)) {
+                    PadProfiles.clearChoice(appContext, pad.descriptor)
+                }
+            }
+            if (descriptor != null) PadProfiles.setChoice(appContext, descriptor, xuid)
+        }
+        refresh()
+    }
+
+    fun connectedControllers(): List<GamepadDevice> = connectedGamepads()
 
     private fun slotKey(slot: Int) = "logged_profile_slot_${slot}_xuid"
 

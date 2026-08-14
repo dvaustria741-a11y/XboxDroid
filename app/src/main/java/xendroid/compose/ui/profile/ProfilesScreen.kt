@@ -38,6 +38,9 @@ import xendroid.compose.settings.Setting
 import xendroid.compose.settings.SettingsSchema
 import xendroid.compose.ui.profile.ProfileManagerViewModel.ListState
 import xendroid.compose.ui.profile.ProfileManagerViewModel.OpState
+import xendroid.compose.gamepad.GamepadDevice
+import xendroid.compose.gamepad.PlayerSetup
+import xendroid.compose.gamepad.rememberConnectedPads
 import xendroid.compose.ui.profile.ProfileManagerViewModel.ProfileEntry
 
 // Top-level vals, so a hard cast on a key whose toml section moved would throw
@@ -66,6 +69,11 @@ fun ProfilesScreen(
 ) {
     val listState by vm.listState.collectAsStateWithLifecycle()
     val opState by vm.opState.collectAsStateWithLifecycle()
+    // A controller coming or going changes which pad drives a profile, and the
+    // start-up dialog can rewrite the slots while this screen is open.
+    val pads = rememberConnectedPads()
+    val assignments by PlayerSetup.revision.collectAsStateWithLifecycle()
+    LaunchedEffect(pads.joinToString(",") { it.descriptor }, assignments) { vm.refresh() }
     var editing by remember { mutableStateOf<Editing>(Editing.None) }
     var deleteTarget by remember { mutableStateOf<ProfileEntry?>(null) }
 
@@ -98,7 +106,9 @@ fun ProfilesScreen(
                     } else {
                         ProfileList(
                             profiles = s.profiles,
+                            controllers = pads,
                             onAssign = vm::assignSlot,
+                            onAttach = vm::attachController,
                             onRename = { editing = Editing.Rename(it) },
                             onDelete = { deleteTarget = it },
                         )
@@ -169,7 +179,9 @@ fun ProfilesScreen(
 @Composable
 private fun ProfileList(
     profiles: List<ProfileEntry>,
+    controllers: List<GamepadDevice>,
     onAssign: (Int, String) -> Unit,
+    onAttach: (String, String?) -> Unit,
     onRename: (ProfileEntry) -> Unit,
     onDelete: (ProfileEntry) -> Unit,
 ) {
@@ -183,7 +195,9 @@ private fun ProfileList(
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
                 supportingContent = {
-                    Text(p.slot?.let { "Player ${it + 1}" } ?: "Not signed in")
+                    val slot = p.slot?.let { "Player ${it + 1}" } ?: "Not signed in"
+                    Text(p.controller?.let { "$slot - ${it.name}" } ?: slot,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
                 trailingContent = { RowMenu(p, onRename, onDelete) },
                 modifier = Modifier.clickable { slotMenu = true },
@@ -211,6 +225,30 @@ private fun ProfileList(
                                 onAssign(p.slot, "")
                             },
                         )
+                    }
+                    if (controllers.isNotEmpty()) {
+                        HorizontalDivider()
+                        for (pad in controllers) {
+                            DropdownMenuItem(
+                                text = { Text("Play with ${pad.name}") },
+                                trailingIcon = if (p.controller?.descriptor == pad.descriptor) ({
+                                    Icon(Icons.Default.CheckCircle, contentDescription = null)
+                                }) else null,
+                                onClick = {
+                                    slotMenu = false
+                                    onAttach(p.xuid, pad.descriptor)
+                                },
+                            )
+                        }
+                        if (p.controllerAttached) {
+                            DropdownMenuItem(
+                                text = { Text("Detach controller") },
+                                onClick = {
+                                    slotMenu = false
+                                    onAttach(p.xuid, null)
+                                },
+                            )
+                        }
                     }
                 }
             }
