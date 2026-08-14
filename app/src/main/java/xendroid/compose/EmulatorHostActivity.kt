@@ -60,7 +60,6 @@ import xendroid.compose.ui.disc.DiscSwapPanel
 import xendroid.compose.ui.keyboard.GuestKeyboardPanel
 import xendroid.compose.ui.keyboard.clampToUtf16Units
 import xendroid.compose.ui.messagebox.GuestMessageBoxPanel
-import xendroid.compose.ui.pause.PAUSE_OPTION_CONTROLLERS
 import xendroid.compose.ui.pause.PAUSE_OPTION_COUNT
 import xendroid.compose.settings.ConfigStore
 import xendroid.compose.ui.pause.PAUSE_OPTION_QUIT
@@ -68,8 +67,6 @@ import xendroid.compose.ui.pause.PAUSE_OPTION_TOUCH_OVERLAY
 import xendroid.compose.ui.pause.PAUSE_OPTION_RESUME
 import xendroid.compose.ui.pause.PauseMenuPanel
 import xendroid.compose.ui.theme.xendroidTheme
-import xendroid.compose.ui.controllers.ControllerSlotRow
-import xendroid.compose.ui.controllers.ControllerSlotsPanel
 import xendroid.compose.gamepad.ControllerRegistry
 import xendroid.compose.gamepad.RumbleDriver
 import xendroid.compose.gamepad.GamepadConfigDto
@@ -141,12 +138,13 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val messageBoxRequestState =
         mutableStateOf<Emulator.MessageBoxRequest?>(null)
     private val panelSelectedState = mutableIntStateOf(0)
-    private val controllersOpenState = mutableStateOf(false)
-    private val controllerRowsState = mutableStateOf<List<ControllerSlotRow>>(emptyList())
     private val keyboardTextState = mutableStateOf("")
 
     // Falls back to GameButtons.DEFAULT_LOOKUP until KeymapStore loads in onCreate.
     @Volatile private var keyMap: Map<Int, Int> = GameButtons.DEFAULT_LOOKUP
+    @Volatile private var keyMapByDevice: Map<String, Map<Int, Int>> = emptyMap()
+    // Cached per Android device id so a keystroke never re-queries InputDevice.
+    private val keyMapForDevice = HashMap<Int, Map<Int, Int>>()
     private var vibrator: Vibrator? = null
     private val controllers = ControllerRegistry(session)
     private val rumble by lazy { RumbleDriver(this) }
@@ -180,6 +178,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 EmulatorRuntime.ensureLoaded()            // idempotent; lazy on Adreno 5xx/6xx
                 store.androidToGameKey.firstOrNull() ?: GameButtons.DEFAULT_LOOKUP
             }
+            keyMapByDevice = withContext(Dispatchers.IO) {
+                store.androidToGameKeyByDevice.firstOrNull() ?: emptyMap()
+            }
+            synchronized(keyMapForDevice) { keyMapForDevice.clear() }
             // show_debug_overlay lives in the native TOML config, not SharedPreferences;
             // read it off-main via ConfigStore.
             showFpsOverlay.value = withContext(Dispatchers.IO) { readShowDebugOverlay() }
@@ -419,18 +421,6 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                         }
                     }
 
-                    val controllersOpen by controllersOpenState
-                    if (controllersOpen) {
-                        xendroidTheme {
-                            ControllerSlotsPanel(
-                                devices = controllerRowsState.value,
-                                selected = panelSelectedState.intValue,
-                                onCycleSlot = { row -> cycleControllerSlot(row) },
-                                onClose = { closeControllers() },
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                        }
-                    }
                 }
 
                 // Back / swipe-back PAUSES the game and opens a Quit menu instead of leaving to
@@ -458,10 +448,6 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                         selected = panelSelectedState.intValue,
                         touchOverlayShown = showTouchOverlay.value == true,
                         onToggleTouchOverlay = { toggleTouchOverlay() },
-                        onControllers = {
-                            menuOpenState.value = false
-                            openControllers()
-                        },
                         onResume = { closeMenuAndResume() },
                         onQuit = { finish() },
                         modifier = Modifier.fillMaxSize(),
@@ -578,7 +564,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             // Swallow the rest so neither the game nor an OEM overlay reacts behind it.
             if (consumeIfGamepad(event)) return true
         }
-        val gameKey = keyMap[keyCode]
+        val gameKey = keyMapFor(event.deviceId)[keyCode]
             ?: return consumeIfGamepad(event) || super.onKeyDown(keyCode, event)
         if (event.repeatCount == 0) {
             session.keyEvent(deviceSlotFor(event.deviceId), gameKey, true, KEY_VALUE_UNUSED)
@@ -591,7 +577,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (panelNav() != null && (isPanelKey(keyCode) || consumeIfGamepad(event))) {
             return true
         }
-        val gameKey = keyMap[keyCode]
+        val gameKey = keyMapFor(event.deviceId)[keyCode]
             ?: return consumeIfGamepad(event) || super.onKeyUp(keyCode, event)
         session.keyEvent(deviceSlotFor(event.deviceId), gameKey, false, KEY_VALUE_UNUSED)
         return true
@@ -600,33 +586,24 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun vibratorForSlot(deviceSlot: Int) =
         rumble.vibratorForDevice(controllers.androidDeviceIdFor(deviceSlot))
 
-    private fun openControllers() {
-        controllers.refresh()
-        refreshControllerRows()
-        panelSelectedState.intValue = 0
-        controllersOpenState.value = true
-        if (session.booted) session.pause()
-    }
 
-    private fun closeControllers() {
-        controllersOpenState.value = false
-        if (session.booted) session.resumeIfPaused()
-    }
 
-    private fun refreshControllerRows() {
-        controllerRowsState.value = session.listInputDevices().map { device ->
-            ControllerSlotRow(device.device_slot, device.display_name ?: "Controller", device.guest_slot)
-        }
-    }
 
     /** Wraps past player 4 to unmapped. */
-    private fun cycleControllerSlot(row: ControllerSlotRow) {
-        val next = if (row.guestSlot in 0..2) row.guestSlot + 1 else if (row.guestSlot == 3) -1 else 0
-        if (next < 0) session.unbindInputSlot(row.guestSlot) else session.bindInputSlot(next, row.deviceSlot)
-        refreshControllerRows()
-    }
 
     /** Keyboards and remotes keep feeding the overlay's slot. */
+    /** A device's own mapping if it declared one, else the shared mapping. */
+    private fun keyMapFor(deviceId: Int): Map<Int, Int> {
+        if (keyMapByDevice.isEmpty()) return keyMap
+        synchronized(keyMapForDevice) { keyMapForDevice[deviceId] }?.let { return it }
+        val descriptor = InputDevice.getDevice(deviceId)?.descriptor
+        val resolved = descriptor
+            ?.let { keyMapByDevice[KeymapStore.sanitize(it)] }
+            ?: keyMap
+        synchronized(keyMapForDevice) { keyMapForDevice[deviceId] = resolved }
+        return resolved
+    }
+
     private fun deviceSlotFor(deviceId: Int): Int =
         controllers.padFor(deviceId)?.deviceSlot ?: controllers.touchSlot()
 
@@ -751,13 +728,6 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     )
 
     private fun panelNav(): PanelNav? {
-        if (controllersOpenState.value) {
-            val rows = controllerRowsState.value
-            // Close is the last option.
-            return PanelNav(rows.size + 1,
-                { i -> if (i < rows.size) cycleControllerSlot(rows[i]) else closeControllers() },
-                { closeControllers() })
-        }
         discRequestState.value?.let { req ->
             val paths = req.discPaths ?: emptyArray()
             val discs = minOf(req.discLabels?.size ?: 0, paths.size)
@@ -783,10 +753,6 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                     when (i) {
                         PAUSE_OPTION_QUIT -> finish()
                         PAUSE_OPTION_TOUCH_OVERLAY -> toggleTouchOverlay()
-                        PAUSE_OPTION_CONTROLLERS -> {
-                            menuOpenState.value = false
-                            openControllers()
-                        }
                         else -> closeMenuAndResume()
                     }
                 },

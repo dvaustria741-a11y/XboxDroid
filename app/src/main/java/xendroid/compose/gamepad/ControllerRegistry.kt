@@ -15,6 +15,8 @@ import xendroid.compose.core.EmulatorSession
  */
 class ControllerRegistry(private val session: EmulatorSession) {
 
+    private var appContext: Context? = null
+
     class PadState(val deviceSlot: Int) {
         val axisPressed = BooleanArray(24)
         val axisValue = IntArray(24) { Int.MIN_VALUE }
@@ -41,6 +43,7 @@ class ControllerRegistry(private val session: EmulatorSession) {
     }
 
     fun start(context: Context) {
+        appContext = context.applicationContext
         touchSlot()
         val manager = context.getSystemService(Context.INPUT_SERVICE) as? InputManager ?: return
         inputManager = manager
@@ -78,16 +81,23 @@ class ControllerRegistry(private val session: EmulatorSession) {
             return null
         }
         val stableId = device.descriptor ?: "android-pad-$deviceId"
-        val slot = session.attachInputDevice(stableId, device.name ?: "Controller", SUBTYPE_GAMEPAD, -1)
+        val preferred = appContext?.let { PadSlots.preferredSlot(it, stableId) } ?: PadSlots.AUTO
+        val slot = session.attachInputDevice(
+            stableId, device.name ?: "Controller", SUBTYPE_GAMEPAD, preferred)
         if (slot < 0) return null
         logAxes(device, slot)
         val state = PadState(slot)
         pads[deviceId] = state
-        // First physical pad takes player 1 from the overlay, which would
-        // otherwise hold slot 0 and push the pad to player 2.
-        if (pads.size == 1) {
-            session.bindInputSlot(0, slot)
+        // Binding is explicit, not left to auto-placement: reconciliation only
+        // honors a preferred slot while that slot is FREE, and the on-screen
+        // overlay already holds player 1 - so an auto-placed pad lands one slot
+        // late and pushes the next pad off the end.
+        if (preferred != PadSlots.AUTO) {
+            session.bindInputSlot(preferred, slot)
+        } else if (pads.size == 1) {
+                session.bindInputSlot(0, slot)
         }
+        logBindings("attach ${device.name}")
         return state
     }
 
@@ -98,6 +108,14 @@ class ControllerRegistry(private val session: EmulatorSession) {
         if (pads.isEmpty() && touchSlot >= 0) {
             session.bindInputSlot(0, touchSlot)
         }
+        logBindings("detach id=$deviceId")
+    }
+
+    private fun logBindings(reason: String) {
+        val rows = session.listInputDevices().joinToString(", ") { d ->
+            "p${d.guest_slot + 1}<-drv${d.device_slot} '${d.display_name ?: "?"}'"
+        }
+        Log.i(TAG, "bindings ($reason): $rows")
     }
 
     /** Which axes a pad publishes decides whether its triggers arrive as
