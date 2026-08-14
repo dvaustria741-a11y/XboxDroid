@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.os.Build
 import android.os.VibrationAttributes
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -21,32 +22,42 @@ class RumbleDriver(context: Context) {
     private val appContext = context.applicationContext
     private val systemVibrator: Vibrator? = resolveSystemVibrator()
     private val lastAmplitude = HashMap<Int, Int>()
+    private val lastIssuedAt = HashMap<Int, Long>()
 
     /**
      * @param state left/right pairs indexed by device slot, as returned by native
      * @param vibratorFor device slot -> vibrator, null for slots with no motor
      */
     fun apply(state: IntArray, vibratorFor: (Int) -> Vibrator?) {
+        val now = SystemClock.uptimeMillis()
         for (slot in 0 until state.size / 2) {
-            val left = state[slot * 2]
-            val right = state[slot * 2 + 1]
-            // One motor: take the stronger of the two, mapped onto 1..255.
-            val strongest = maxOf(left, right)
-            val amplitude = if (strongest <= 0) 0 else (strongest * 255 / 65535).coerceIn(1, 255)
-            if (lastAmplitude[slot] == amplitude) continue
-            lastAmplitude[slot] = amplitude
+            val target = amplitudeFor(maxOf(state[slot * 2], state[slot * 2 + 1]))
+            val current = lastAmplitude[slot] ?: 0
+            if (target == current) continue
+            // Issuing an effect replaces the one playing, stopping the motor and
+            // spinning it up again from rest. Start and stop must be immediate, but
+            // a level change between them is held back: at poll rate the restarts
+            // alone keep the motor from ever reaching full strength.
+            if (target != 0 && current != 0 &&
+                now - (lastIssuedAt[slot] ?: 0L) < REISSUE_MIN_MS) continue
             val vibrator = vibratorFor(slot)
-            Log.i(TAG, "slot=$slot guest=$left/$right amplitude=$amplitude " +
-                "vibrator=${vibrator != null} amplitudeControl=${vibrator?.hasAmplitudeControl()}")
+            Log.i(TAG, "slot=$slot guest=${state[slot * 2]}/${state[slot * 2 + 1]} " +
+                "amplitude=$target vibrator=${vibrator != null}")
+            lastAmplitude[slot] = target
+            lastIssuedAt[slot] = now
             if (vibrator == null) continue
             runCatching {
-                if (amplitude == 0) {
-                    vibrator.cancel()
-                } else {
-                    play(vibrator, amplitude)
-                }
+                if (target == 0) vibrator.cancel() else play(vibrator, target)
             }
         }
+    }
+
+    /** Quantized so small fluctuations do not restart the motor, and floored
+     *  because below roughly a fifth of full scale an LRA barely moves. */
+    private fun amplitudeFor(strongest: Int): Int {
+        if (strongest <= 0) return 0
+        val step = ((strongest.toLong() * STEPS + 32767) / 65535).toInt().coerceIn(1, STEPS)
+        return MIN_AMPLITUDE + (255 - MIN_AMPLITUDE) * (step - 1) / (STEPS - 1)
     }
 
     // Tagged as game usage so the system touch-feedback setting does not filter it.
@@ -74,6 +85,7 @@ class RumbleDriver(context: Context) {
             runCatching { vibratorFor(slot)?.cancel() }
         }
         lastAmplitude.clear()
+        lastIssuedAt.clear()
     }
 
     /** Falls back to the console's own motor for the on-screen overlay, and when
@@ -103,6 +115,9 @@ class RumbleDriver(context: Context) {
 
     private companion object {
         const val PULSE_MS = 60_000L
+        const val REISSUE_MIN_MS = 100L
+        const val STEPS = 8
+        const val MIN_AMPLITUDE = 48
         const val TAG = "XenDroidRumble"
     }
 }
