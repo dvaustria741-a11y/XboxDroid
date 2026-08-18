@@ -1,6 +1,7 @@
 package xendroid.compose.ui.about
 
 import android.webkit.WebView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -10,10 +11,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import xendroid.compose.Emulator
+import xendroid.compose.R
 
 private const val TITLE = "Xendroid — Xbox 360 emulation on Android."
 
@@ -51,7 +55,13 @@ fun AboutScreen(onBack: () -> Unit) {
             Modifier.fillMaxSize().padding(padding).padding(16.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
-            Text("xendroid", style = MaterialTheme.typography.headlineSmall)
+            Image(
+                painter = painterResource(R.drawable.xboxdroid_wordmark),
+                contentDescription = "XboxDroid",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth().height(64.dp),
+            )
+            Spacer(Modifier.height(8.dp))
             Text("Version $versionName", style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(16.dp))
 
