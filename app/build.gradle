@@ -30,7 +30,10 @@ android {
         // 29+ matches :emulator-core (native ELF TLS in libe.so).
         minSdk 29
         targetSdk 35
-        versionCode 1
+        // Must increase every release or Android treats a new APK as the same version and
+        // silently refuses to replace what's already installed. Driven by the CI run
+        // number (see XenDroid.yml); falls back to 1 for local/manual builds.
+        versionCode (project.findProperty("versionCode")?.toString()?.toInteger() ?: 1)
         versionName project.findProperty("gitHash") ?: "unknown"
         
     }
