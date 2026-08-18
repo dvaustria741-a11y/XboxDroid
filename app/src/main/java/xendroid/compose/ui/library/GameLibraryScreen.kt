@@ -18,9 +18,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
@@ -143,11 +140,19 @@ fun GameLibraryScreen(
                     ),
                     actions = {
                         IconButton(onClick = onOpenSettings) {
-                            Icon(Icons.Default.Settings, contentDescription = "Settings")
+                            Image(
+                                painter = painterResource(R.drawable.ic_gear_blade),
+                                contentDescription = "Settings",
+                                modifier = Modifier.size(28.dp),
+                            )
                         }
                         var menuOpen by remember { mutableStateOf(false) }
                         IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More")
+                            Image(
+                                painter = painterResource(R.drawable.ic_menu_blade),
+                                contentDescription = "More",
+                                modifier = Modifier.size(28.dp),
+                            )
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             // Only offered where All Files Access exists (API 30+); on API 29 the
