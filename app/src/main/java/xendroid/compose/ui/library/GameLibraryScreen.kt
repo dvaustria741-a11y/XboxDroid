@@ -3,13 +3,21 @@ package xendroid.compose.ui.library
 import android.app.Activity
 import android.content.Context
 import android.util.Log
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
@@ -18,9 +26,16 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import xendroid.compose.R
+import xendroid.compose.ui.theme.BladeTile
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -486,13 +501,28 @@ private fun GameGrid(
     onLaunch: (Game) -> Unit,
     onLongPress: (Game) -> Unit,
 ) {
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 120.dp),
-        contentPadding = PaddingValues(12.dp),
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        items(games, key = { it.stableId }) { game ->
-            GameCell(game, viewModel, onLaunch, onLongPress)
+    Box(Modifier.fillMaxSize()) {
+        // Ambient blade backdrop: dark texture with a soft green glow, dimmed further so
+        // tiles stay the clear focal point rather than competing with it.
+        Image(
+            painter = painterResource(R.drawable.library_bg),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(BladeTile.ScreenTint.copy(alpha = 0.55f))
+        )
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 132.dp),
+            contentPadding = PaddingValues(12.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            items(games, key = { it.stableId }) { game ->
+                GameCell(game, viewModel, onLaunch, onLongPress)
+            }
         }
     }
 }
@@ -509,23 +539,58 @@ private fun GameCell(
     // Once per cell: the File.exists() stat must not run on every recomposition while
     // scrolling.
     val iconModel = remember(game.stableId) { viewModel.iconFileOrFallback(game) }
+
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val glowAlpha by animateFloatAsState(
+        targetValue = if (pressed) 1f else 0.55f,
+        animationSpec = tween(150),
+        label = "tileGlow",
+    )
+    val borderWidth = if (pressed) BladeTile.TileBorderWidthFocused else BladeTile.TileBorderWidth
+
     Column(
         Modifier
             .padding(8.dp)
-            .combinedClickable(onClick = { onLaunch(game) }, onLongClick = { onLongPress(game) }),
+            .clip(RoundedCornerShape(BladeTile.TileCorner))
+            .background(
+                Brush.verticalGradient(
+                    listOf(BladeTile.SurfaceRaised, BladeTile.Surface)
+                )
+            )
+            .border(
+                width = borderWidth,
+                color = BladeTile.Glow.copy(alpha = glowAlpha),
+                shape = RoundedCornerShape(BladeTile.TileCorner),
+            )
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = { onLaunch(game) },
+                onLongClick = { onLongPress(game) },
+            )
+            .padding(10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        AsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(iconModel)
-                .build(),
-            contentDescription = game.name,
-            modifier = Modifier.size(96.dp),
-        )
-        Spacer(Modifier.height(4.dp))
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(BladeTile.Surface),
+        ) {
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(iconModel)
+                    .build(),
+                contentDescription = game.name,
+                modifier = Modifier.size(BladeTile.IconSize),
+            )
+        }
+        Spacer(Modifier.height(6.dp))
         Text(
             game.name,
             style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+            color = BladeTile.TextPrimary,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
@@ -534,7 +599,7 @@ private fun GameCell(
             Text(
                 "Disc ${game.discNumber} of ${game.discCount}",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = BladeTile.TextSecondary,
                 maxLines = 1,
             )
         }
