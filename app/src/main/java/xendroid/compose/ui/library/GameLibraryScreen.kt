@@ -127,68 +127,87 @@ fun GameLibraryScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Library") },
-                actions = {
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
-                    }
-                    var menuOpen by remember { mutableStateOf(false) }
-                    IconButton(onClick = { menuOpen = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "More")
-                    }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        // Only offered where All Files Access exists (API 30+); on API 29 the
-                        // empty state explains why.
-                        if (AllFilesAccess.isSupported) {
-                            DropdownMenuItem(
-                                text = { Text("Set game folder") },
-                                onClick = { menuOpen = false; startRealPathMode() },
-                            )
+            Column {
+                TopAppBar(
+                    title = {
+                        Text(
+                            "Library",
+                            fontWeight = FontWeight.Bold,
+                            color = BladeTile.TextPrimary,
+                        )
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = BladeTile.Surface,
+                        titleContentColor = BladeTile.TextPrimary,
+                        actionIconContentColor = BladeTile.Glow,
+                    ),
+                    actions = {
+                        IconButton(onClick = onOpenSettings) {
+                            Icon(Icons.Default.Settings, contentDescription = "Settings")
                         }
-                        DropdownMenuItem(
-                            text = { Text("Install content") },
-                            onClick = { menuOpen = false; onOpenInstallContent() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Profiles") },
-                            onClick = { menuOpen = false; onOpenProfiles() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Key mapping") },
-                            onClick = { menuOpen = false; onOpenKeymap() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Touch controls") },
-                            onClick = { menuOpen = false; onOpenTouchControls() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Open user data") },
-                            onClick = {
-                                menuOpen = false
-                                openUserData(context)
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("About") },
-                            onClick = { menuOpen = false; onOpenAbout() },
-                        )
-
-                        DropdownMenuItem(
-                            text = { Text("Check for Updates") },
-                            onClick = {
-                                menuOpen = false
-
-                                checkForUpdatesClicked(
-                                    context = context,
-                                    scope = scope,
-                                    onResult = { updateResult = it }
+                        var menuOpen by remember { mutableStateOf(false) }
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More")
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            // Only offered where All Files Access exists (API 30+); on API 29 the
+                            // empty state explains why.
+                            if (AllFilesAccess.isSupported) {
+                                DropdownMenuItem(
+                                    text = { Text("Set game folder") },
+                                    onClick = { menuOpen = false; startRealPathMode() },
                                 )
                             }
-                        )
+                            DropdownMenuItem(
+                                text = { Text("Install content") },
+                                onClick = { menuOpen = false; onOpenInstallContent() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Profiles") },
+                                onClick = { menuOpen = false; onOpenProfiles() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Key mapping") },
+                                onClick = { menuOpen = false; onOpenKeymap() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Touch controls") },
+                                onClick = { menuOpen = false; onOpenTouchControls() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Open user data") },
+                                onClick = {
+                                    menuOpen = false
+                                    openUserData(context)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("About") },
+                                onClick = { menuOpen = false; onOpenAbout() },
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Check for Updates") },
+                                onClick = {
+                                    menuOpen = false
+
+                                    checkForUpdatesClicked(
+                                        context = context,
+                                        scope = scope,
+                                        onResult = { updateResult = it }
+                                    )
+                                }
+                            )
+                        }
                     }
-                }
-            )
+                )
+                // Blade-edge seam: a thin glowing line separating the bar from the tile
+                // backdrop below, echoing the tile borders instead of a flat Material shadow.
+                HorizontalDivider(
+                    thickness = 2.dp,
+                    color = BladeTile.Glow.copy(alpha = 0.6f),
+                )
+            }
         }
     ) { padding ->
         PullToRefreshBox(
