@@ -145,3 +145,41 @@ GPU/driver, not of a title:
   Qualcomm proprietary drivers — pixel shaders read zeros through
   dynamic-offset uniform descriptors (a650/a740/a830 blobs). Turnip handles it
   and may opt in for the small binding-update win.
+
+### Limbo — `584109D1`
+
+**Status: candidate, NOT yet verified on real hardware.** Added as a starting
+point after a user reported ~5 fps on a sub-minimum-spec device (Adreno 619,
+below the documented Adreno 740+ floor) — this is a hypothesis based on the
+known tiled-GPU/low-end levers in the schema, not a confirmed fix. Whoever
+tests this on-device should update this entry with real before/after numbers
+or delete it if it does nothing.
+
+Upstream compat DB (`game-compatibility/master.json`) already tags this title
+`gpu-drawing-corrupt` at state `Gameplay` (issue #503) — that's a separate,
+pre-existing rendering bug, unrelated to the FPS report here.
+
+`config/584109D1.config.toml`:
+
+```toml
+[GPU]
+render_target_path = "performance"
+native_2x_msaa = false
+framerate_limit = 30
+
+[Vulkan]
+turnip_debug = ""
+```
+
+Reasoning (untested):
+- `render_target_path = performance` and `native_2x_msaa = false` are the two
+  schema options with an explicit "costs GPU time" note attached; forcing them
+  off/fast can't hurt on a below-spec GPU.
+- `turnip_debug = ""` switches off the default `sysmem` (untiled) path in
+  favor of GMEM (tiled). `sysmem` exists specifically to dodge Adreno hangs on
+  *some* titles; if Limbo doesn't hang under GMEM, this should be a real win
+  on a tiled GPU like Adreno 6xx — but it needs to actually be tried per-title.
+- `framerate_limit = 30` doesn't add fps, just gives the frame pacer a lower,
+  steadier target instead of chasing 60.
+
+**Do not assume this fixes anything until someone runs it and reports back.**
