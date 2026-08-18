@@ -186,6 +186,7 @@ jobs:
 
         ./gradlew assembleRelease \
           -PgitHash=${{ steps.git.outputs.hash }} \
+          -PversionCode=${{ github.run_number }} \
           --build-cache \
           --parallel \
           --max-workers=$(nproc) \
