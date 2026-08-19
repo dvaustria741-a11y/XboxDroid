@@ -117,31 +117,18 @@ private fun SettingsIndex(
                 .statusBarsPadding()
                 .navigationBarsPadding(),
         ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = BladeTile.TextPrimary,
-                    )
-                }
-                Text(
-                    "Settings",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = BladeTile.TextPrimary,
-                )
-            }
+            Text(
+                "Settings",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = BladeTile.TextPrimary,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+            )
 
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 items(categories, key = { it.title }) { cat ->
                     val modified = modifiedCountOf(cat)
@@ -188,23 +175,23 @@ private fun SettingsCategoryRow(
                 shape = RoundedCornerShape(BladeTile.TileCorner),
             )
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(14.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .size(36.dp)
+                .clip(RoundedCornerShape(8.dp))
                 .background(BladeTile.SurfaceRaised),
             contentAlignment = Alignment.Center,
         ) {
             Image(
                 painter = painterResource(iconRes),
                 contentDescription = null,
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier.size(22.dp),
             )
         }
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
                 title,
