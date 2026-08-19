@@ -723,18 +723,21 @@ private fun BladeGameCard(
             }
         }
 
-        // Glowing-corner frame from the actual XboxDroid tile asset (a nine-patch, so it
-        // stretches to any cardWidth without distorting the corner glow) drawn over the
-        // content instead of a flat programmatic border stroke. Interior is fully
-        // transparent in the source art, so it only ever adds the ring, never occludes
-        // the banner/icon/text underneath.
-        Image(
-            painter = painterResource(R.drawable.blade_card_frame),
-            contentDescription = null,
-            contentScale = ContentScale.FillBounds,
-            modifier = Modifier
+        // Glowing-corner frame drawn in code rather than the .9.png asset: Compose's
+        // painterResource() does not apply nine-patch stretch/content-area metadata — it
+        // just decodes the file as a flat bitmap, baked-in black border markers and all,
+        // so the asset was rendering as a fixed-size image with visible black seams
+        // instead of actually stretching to cardWidth. A drawn border scales cleanly at
+        // any card size and needs no asset.
+        Box(
+            Modifier
                 .matchParentSize()
-                .alpha(glowAlpha),
+                .clip(RoundedCornerShape(BladeTile.TileCorner))
+                .border(
+                    width = if (pressed) BladeTile.TileBorderWidthFocused else BladeTile.TileBorderWidth,
+                    color = BladeTile.Glow.copy(alpha = glowAlpha),
+                    shape = RoundedCornerShape(BladeTile.TileCorner),
+                ),
         )
     }
 }
