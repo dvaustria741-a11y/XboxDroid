@@ -27,16 +27,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import xendroid.compose.R
 import xendroid.compose.ui.theme.BladeTile
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -129,27 +125,6 @@ fun GameLibraryScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // Immersive by default: status/nav bars stay hidden so the dashboard reads edge to
-    // edge like the real console UI, and a swipe from either edge reveals them
-    // temporarily (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE) rather than the app forcing
-    // them to stay visible. Restored on leaving this screen so other screens aren't
-    // silently left in immersive mode too.
-    val view = LocalView.current
-    DisposableEffect(view) {
-        val activity = context as? Activity
-        if (activity != null) {
-            val window = activity.window
-            WindowCompat.setDecorFitsSystemWindow(window, false)
-            val controller = WindowCompat.getInsetsController(window, view)
-            controller.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(WindowInsetsCompat.Type.systemBars())
-            onDispose { controller.show(WindowInsetsCompat.Type.systemBars()) }
-        } else {
-            onDispose { }
-        }
     }
 
     if (showBrowser) {
