@@ -180,15 +180,15 @@ internal fun SettingsCategoryRow(
     ) {
         Box(
             Modifier
-                .size(36.dp)
-                .clip(RoundedCornerShape(8.dp))
+                .size(44.dp)
+                .clip(RoundedCornerShape(10.dp))
                 .background(BladeTile.SurfaceRaised),
             contentAlignment = Alignment.Center,
         ) {
             Image(
                 painter = painterResource(iconRes),
                 contentDescription = null,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(28.dp),
             )
         }
         Spacer(Modifier.width(12.dp))
@@ -219,21 +219,24 @@ internal fun SettingsLegend(labelA: String, labelB: String, onB: () -> Unit) {
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(20.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        LegendBadge("A", Color(0xFF6FBE44), labelA, onClick = {})
+        // "A" is informational only — tapping a row already opens it directly, there's no
+        // separate focus-then-confirm step for this list, so the badge has nothing to do.
+        // Making it non-clickable stops it from looking like a dead button.
+        LegendBadge("A", Color(0xFF6FBE44), labelA, onClick = null)
         LegendBadge("B", Color(0xFFC0392B), labelB, onClick = onB)
     }
 }
 
 @Composable
-private fun LegendBadge(letter: String, color: Color, label: String, onClick: () -> Unit) {
+private fun LegendBadge(letter: String, color: Color, label: String, onClick: (() -> Unit)?) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(50))
-            .clickable(onClick = onClick)
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
             .padding(vertical = 4.dp, horizontal = 6.dp),
     ) {
         Box(
