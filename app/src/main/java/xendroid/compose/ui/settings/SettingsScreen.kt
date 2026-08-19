@@ -126,7 +126,7 @@ private fun SettingsIndex(
             )
 
             LazyColumn(
-                Modifier.weight(1f).fillMaxWidth(),
+                Modifier.weight(1f).fillMaxWidth().widthIn(max = 620.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
