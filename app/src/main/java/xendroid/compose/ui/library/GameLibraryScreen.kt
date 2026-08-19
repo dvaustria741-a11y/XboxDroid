@@ -26,6 +26,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -187,7 +188,7 @@ fun GameLibraryScreen(
         // tighter.
         val reservedChromeHeight = 160.dp
         val cardWidthByWidth = maxWidth * 0.24f
-        val cardWidthByHeight = (maxHeight - reservedChromeHeight).coerceAtLeast(0.dp) / BladeCardAspect
+        val cardWidthByHeight = cardWidthForHeightBudget((maxHeight - reservedChromeHeight).coerceAtLeast(0.dp))
         val cardWidth = minOf(cardWidthByWidth, cardWidthByHeight).coerceIn(150.dp, 300.dp)
 
         // Ambient blade backdrop, full bleed behind the status bar too, matching the
@@ -289,7 +290,7 @@ fun GameLibraryScreen(
                                     onPageChanged = { currentPage = it },
                                     onLaunch = launchWithDiscCheck,
                                     onDetails = { pendingGame = it },
-                                    modifier = Modifier.height(cardWidth * BladeCardAspect + 16.dp),
+                                    modifier = Modifier.height(cardTotalHeight(cardWidth)),
                                 )
                             }
                     }
@@ -578,14 +579,28 @@ fun GameLibraryScreen(
     }
 }
 
-// Card proportions taken from the Xbox 360 dashboard reference: header strip, icon
-// panel, and text footer all scale together off cardWidth so the tile keeps the same
-// silhouette at any size instead of a fixed-height header/icon fighting a resized card.
+// Card proportions taken from the Xbox 360 dashboard reference: header strip and icon
+// panel scale together off cardWidth so the tile keeps the same silhouette at any size.
+// The footer does NOT scale the same way — it's real text at a fixed type size, so its
+// height stays constant regardless of cardWidth. cardTotalHeight() below reflects that
+// directly (scaled terms + a fixed term) instead of folding everything into one aspect
+// ratio multiplied by cardWidth, which is what let a shrunk-down landscape card's real
+// content (banner + icon box + fixed-height footer) end up taller than the height that
+// ratio predicted — clipping "XboxDroid Game" clean in half.
 private const val BladeHeaderFrac = 42f / 260f
 private const val BladeIconBoxFrac = 220f / 260f
 private const val BladeIconSizeFrac = 160f / 260f
 private val BladeTextFooterHeight = 76.dp // title (up to 2 lines) + subtitle; not scaled — type size doesn't shrink with the card
-val BladeCardAspect = BladeIconBoxFrac + BladeHeaderFrac + (BladeTextFooterHeight / 260.dp)
+private val BladeCardChromeHeight = 16.dp // outer border/seam allowance
+
+/** Total rendered height of a [BladeGameCard] at the given [cardWidth]. */
+fun cardTotalHeight(cardWidth: Dp): Dp =
+    cardWidth * (BladeHeaderFrac + BladeIconBoxFrac) + BladeTextFooterHeight + BladeCardChromeHeight
+
+/** Inverse of [cardTotalHeight]: the widest card that still fits within [budget] of height. */
+fun cardWidthForHeightBudget(budget: Dp): Dp =
+    ((budget - BladeTextFooterHeight - BladeCardChromeHeight) / (BladeHeaderFrac + BladeIconBoxFrac))
+        .coerceAtLeast(0.dp)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -641,71 +656,86 @@ private fun BladeGameCard(
         label = "cardGlow",
     )
 
-    Column(
-        Modifier
-            .width(cardWidth)
-            .clip(RoundedCornerShape(BladeTile.TileCorner))
-            .background(BladeTile.Surface)
-            .border(
-                width = 2.dp,
-                color = BladeTile.Glow.copy(alpha = glowAlpha),
-                shape = RoundedCornerShape(BladeTile.TileCorner),
-            )
-            .combinedClickable(
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = onLaunch,
-                onLongClick = onDetails,
-            ),
-    ) {
-        // Header banner: the XboxDroid wordmark on its diagonal green sweep, standing in
-        // for the "XBOX 360" title strip on the real dashboard's game tiles.
-        Image(
-            painter = painterResource(R.drawable.xboxdroid_wordmark),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(cardWidth * BladeHeaderFrac)
-                .clip(RoundedCornerShape(topStart = BladeTile.TileCorner, topEnd = BladeTile.TileCorner)),
-        )
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(cardWidth * BladeIconBoxFrac)
-                .background(BladeTile.Surface),
-            contentAlignment = Alignment.Center,
-        ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context).data(iconModel).build(),
-                contentDescription = game.name,
-                modifier = Modifier.size(cardWidth * BladeIconSizeFrac),
-            )
-        }
+    Box(Modifier.width(cardWidth)) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .background(BladeTile.SurfaceRaised)
-                .heightIn(min = BladeTextFooterHeight)
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .clip(RoundedCornerShape(BladeTile.TileCorner))
+                .background(BladeTile.Surface)
+                .combinedClickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    // A tap only selects/keeps this card current (the pager already does
+                    // that on swipe) -- it must NOT launch the game. Launch only happens
+                    // from the "A" legend button, matching the reference dashboard where
+                    // tapping a tile highlights it and a separate confirm launches it.
+                    onClick = {},
+                    onLongClick = onDetails,
+                ),
         ) {
-            Text(
-                game.name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = BladeTile.TextPrimary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+            // Header banner: the XboxDroid wordmark on its diagonal green sweep, standing in
+            // for the "XBOX 360" title strip on the real dashboard's game tiles.
+            Image(
+                painter = painterResource(R.drawable.xboxdroid_wordmark),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(cardWidth * BladeHeaderFrac)
+                    .clip(RoundedCornerShape(topStart = BladeTile.TileCorner, topEnd = BladeTile.TileCorner)),
             )
-            Text(
-                // A set shares one title, so the tiles would otherwise be identical.
-                if (game.isMultiDisc) "Disc ${game.discNumber} of ${game.discCount}"
-                else "XboxDroid Game",
-                style = MaterialTheme.typography.bodySmall,
-                color = BladeTile.TextSecondary,
-                maxLines = 1,
-            )
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(cardWidth * BladeIconBoxFrac)
+                    .background(BladeTile.Surface),
+                contentAlignment = Alignment.Center,
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context).data(iconModel).build(),
+                    contentDescription = game.name,
+                    modifier = Modifier.size(cardWidth * BladeIconSizeFrac),
+                )
+            }
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(BladeTile.SurfaceRaised)
+                    .heightIn(min = BladeTextFooterHeight)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
+                Text(
+                    game.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = BladeTile.TextPrimary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    // A set shares one title, so the tiles would otherwise be identical.
+                    if (game.isMultiDisc) "Disc ${game.discNumber} of ${game.discCount}"
+                    else "XboxDroid Game",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BladeTile.TextSecondary,
+                    maxLines = 1,
+                )
+            }
         }
+
+        // Glowing-corner frame from the actual XboxDroid tile asset (a nine-patch, so it
+        // stretches to any cardWidth without distorting the corner glow) drawn over the
+        // content instead of a flat programmatic border stroke. Interior is fully
+        // transparent in the source art, so it only ever adds the ring, never occludes
+        // the banner/icon/text underneath.
+        Image(
+            painter = painterResource(R.drawable.blade_card_frame),
+            contentDescription = null,
+            contentScale = ContentScale.FillBounds,
+            modifier = Modifier
+                .matchParentSize()
+                .alpha(glowAlpha),
+        )
     }
 }
 
