@@ -35,6 +35,7 @@ import xendroid.compose.R
 import xendroid.compose.settings.SettingValue
 import xendroid.compose.settings.SettingsCategory
 import xendroid.compose.settings.SettingsViewModel
+import xendroid.compose.ui.ImmersiveSystemBars
 import xendroid.compose.ui.theme.BladeTile
 
 /**
@@ -45,6 +46,7 @@ import xendroid.compose.ui.theme.BladeTile
  */
 @Composable
 fun SettingsScreen(vm: SettingsViewModel, onBack: () -> Unit) {
+    ImmersiveSystemBars()
     val values by vm.values.collectAsStateWithLifecycle()
 
     // Durable flush on pause; re-open on resume. Dispose flush = backstop.
