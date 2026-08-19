@@ -14,9 +14,9 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -24,7 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -89,6 +89,22 @@ fun GameLibraryScreen(
 
     var showBrowser by remember { mutableStateOf(false) }
     var allFilesGranted by remember { mutableStateOf(AllFilesAccess.isGranted()) }
+    var menuOpen by remember { mutableStateOf(false) }
+    // Tracks which single game the Blades-style pager currently has focused, so the
+    // header "N of M" line and the A/X/Y legend stay in sync with the visible card.
+    var currentPage by remember { mutableStateOf(0) }
+    val launchWithDiscCheck: (Game) -> Unit = { game ->
+        scope.launch {
+            // A mandatory-install disc is still bootable, so this asks rather than
+            // diverting the launch on its own.
+            val pending = viewModel.uninstalledDiscContent(game)
+            if (pending.isNotEmpty()) {
+                pendingDiscInstall = game to pending.size
+            } else {
+                launchGame(context, viewModel, game)
+            }
+        }
+    }
     // Not-yet-granted sends the user to Settings; the grant returns no result, so it is
     // observed on the next ON_START.
     val startRealPathMode: () -> Unit = {
@@ -122,31 +138,57 @@ fun GameLibraryScreen(
         return
     }
 
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(
-                    title = {
+    Box(Modifier.fillMaxSize()) {
+        // Ambient blade backdrop, full bleed behind the status bar too, matching the
+        // Xbox 360 dashboard's edge-to-edge glow instead of sitting under a flat app bar.
+        Image(
+            painter = painterResource(R.drawable.library_bg),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Box(Modifier.fillMaxSize().background(BladeTile.ScreenTint.copy(alpha = 0.55f)))
+
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+        ) {
+            val loaded = state as? LibraryUiState.Loaded
+            val pageCount = loaded?.games?.size ?: 0
+
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top,
+            ) {
+                Column {
+                    Text(
+                        "Library",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = BladeTile.TextPrimary,
+                    )
+                    if (pageCount > 0) {
                         Text(
-                            "Library",
-                            fontWeight = FontWeight.Bold,
-                            color = BladeTile.TextPrimary,
+                            "${currentPage + 1} of $pageCount",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = BladeTile.TextSecondary,
                         )
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = BladeTile.Surface,
-                        titleContentColor = BladeTile.TextPrimary,
-                        actionIconContentColor = BladeTile.Glow,
-                    ),
-                    actions = {
-                        IconButton(onClick = onOpenSettings) {
-                            Image(
-                                painter = painterResource(R.drawable.ic_gear_blade),
-                                contentDescription = "Settings",
-                                modifier = Modifier.size(28.dp),
-                            )
-                        }
-                        var menuOpen by remember { mutableStateOf(false) }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onOpenSettings) {
+                        Image(
+                            painter = painterResource(R.drawable.ic_gear_blade),
+                            contentDescription = "Settings",
+                            modifier = Modifier.size(28.dp),
+                        )
+                    }
+                    Box {
                         IconButton(onClick = { menuOpen = true }) {
                             Image(
                                 painter = painterResource(R.drawable.ic_menu_blade),
@@ -190,12 +232,10 @@ fun GameLibraryScreen(
                                 text = { Text("About") },
                                 onClick = { menuOpen = false; onOpenAbout() },
                             )
-
                             DropdownMenuItem(
                                 text = { Text("Check for Updates") },
                                 onClick = {
                                     menuOpen = false
-
                                     checkForUpdatesClicked(
                                         context = context,
                                         scope = scope,
@@ -205,68 +245,78 @@ fun GameLibraryScreen(
                             )
                         }
                     }
-                )
-                // Blade-edge seam: a thin glowing line separating the bar from the tile
-                // backdrop below, echoing the tile borders instead of a flat Material shadow.
-                HorizontalDivider(
-                    thickness = 2.dp,
-                    color = BladeTile.Glow.copy(alpha = 0.6f),
-                )
+                }
             }
-        }
-    ) { padding ->
-        PullToRefreshBox(
-            isRefreshing = isRefreshing,
-            onRefresh = { viewModel.refresh() },
-            modifier = Modifier.fillMaxSize().padding(padding),
-        ) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            val setFolderLabel = if (allFilesGranted) "Set game folder" else "Grant All Files Access"
-            when (val s = state) {
-                LibraryUiState.NoVulkan ->
-                    NoVulkanDialog(onQuit = { (context as? Activity)?.finish() })
-                LibraryUiState.Loading -> CircularProgressIndicator()
-                // All Files Access is API 30+; on API 29 there is no games path at all.
-                LibraryUiState.NoFolder ->
-                    if (AllFilesAccess.isSupported)
-                        EmptyMessage("No game folder set", setFolderLabel,
-                            onAction = startRealPathMode)
-                    else
-                        EmptyMessage(
-                            "Setting a game folder requires Android 11 or newer.",
-                            "OK", onAction = {})
-                LibraryUiState.PermissionLost ->
-                    EmptyMessage("Folder access lost", setFolderLabel,
-                        onAction = startRealPathMode)
-                is LibraryUiState.Error ->
-                    EmptyMessage(s.message, "Retry", onAction = { viewModel.refresh() })
-                is LibraryUiState.Loaded ->
-                    if (s.games.isEmpty())
-                        EmptyMessage("No games in this folder", "Choose another",
-                            onAction = startRealPathMode)
-                    else GameGrid(
-                        games = s.games,
-                        viewModel = viewModel,
-                        onLaunch = { game ->
-                            scope.launch {
-                                // A mandatory-install disc is still bootable, so this asks
-                                // rather than diverting the launch on its own.
-                                val pending = viewModel.uninstalledDiscContent(game)
-                                if (pending.isNotEmpty()) {
-                                    pendingDiscInstall = game to pending.size
-                                } else {
-                                    launchGame(context, viewModel, game)
-                                }
+            // Blade-edge seam: a thin glowing line separating the header from the pager
+            // below, echoing the tile borders instead of a flat Material app bar shadow.
+            HorizontalDivider(thickness = 2.dp, color = BladeTile.Glow.copy(alpha = 0.6f))
+
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                PullToRefreshBox(
+                    isRefreshing = isRefreshing,
+                    onRefresh = { viewModel.refresh() },
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    val setFolderLabel =
+                        if (allFilesGranted) "Set game folder" else "Grant All Files Access"
+                    when (val s = state) {
+                        LibraryUiState.NoVulkan ->
+                            NoVulkanDialog(onQuit = { (context as? Activity)?.finish() })
+                        LibraryUiState.Loading ->
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator()
                             }
-                        },
-                        onLongPress = { pendingGame = it },
-                    )
+                        // All Files Access is API 30+; on API 29 there is no games path at all.
+                        LibraryUiState.NoFolder ->
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                if (AllFilesAccess.isSupported)
+                                    EmptyMessage("No game folder set", setFolderLabel,
+                                        onAction = startRealPathMode)
+                                else
+                                    EmptyMessage(
+                                        "Setting a game folder requires Android 11 or newer.",
+                                        "OK", onAction = {})
+                            }
+                        LibraryUiState.PermissionLost ->
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                EmptyMessage("Folder access lost", setFolderLabel,
+                                    onAction = startRealPathMode)
+                            }
+                        is LibraryUiState.Error ->
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                EmptyMessage(s.message, "Retry", onAction = { viewModel.refresh() })
+                            }
+                        is LibraryUiState.Loaded ->
+                            if (s.games.isEmpty())
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    EmptyMessage("No games in this folder", "Choose another",
+                                        onAction = startRealPathMode)
+                                }
+                            else BladeLibraryPager(
+                                games = s.games,
+                                viewModel = viewModel,
+                                onPageChanged = { currentPage = it },
+                                onLaunch = launchWithDiscCheck,
+                                onDetails = { pendingGame = it },
+                            )
+                    }
+                }
             }
-        }
+
+            // Bottom action legend, mirroring the Xbox 360 A/X/Y control hints — tappable
+            // here since touch has no physical controller to read them off of.
+            val currentGame = loaded?.games?.getOrNull(currentPage)
+            if (currentGame != null) {
+                BladeButtonLegend(
+                    onLaunch = { launchWithDiscCheck(currentGame) },
+                    onDetails = { pendingGame = currentGame },
+                    onOptions = { menuOpen = true },
+                )
+            }
         }
     }
 
-   when (val result = updateResult) {
+    when (val result = updateResult) {
         is UpdateResult.Available -> {
             UpdateDialog(
                 release = result.release,
@@ -519,114 +569,158 @@ fun GameLibraryScreen(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun GameGrid(
+private fun BladeLibraryPager(
     games: List<Game>,
     viewModel: GameLibraryViewModel,
+    onPageChanged: (Int) -> Unit,
     onLaunch: (Game) -> Unit,
-    onLongPress: (Game) -> Unit,
+    onDetails: (Game) -> Unit,
 ) {
-    Box(Modifier.fillMaxSize()) {
-        // Ambient blade backdrop: dark texture with a soft green glow, dimmed further so
-        // tiles stay the clear focal point rather than competing with it.
-        Image(
-            painter = painterResource(R.drawable.library_bg),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-        )
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(BladeTile.ScreenTint.copy(alpha = 0.55f))
-        )
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 132.dp),
-            contentPadding = PaddingValues(12.dp),
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            items(games, key = { it.stableId }) { game ->
-                GameCell(game, viewModel, onLaunch, onLongPress)
-            }
+    val pagerState = rememberPagerState(pageCount = { games.size })
+    LaunchedEffect(pagerState.currentPage) { onPageChanged(pagerState.currentPage) }
+
+    HorizontalPager(
+        state = pagerState,
+        pageSpacing = 16.dp,
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp),
+        modifier = Modifier.fillMaxSize(),
+    ) { page ->
+        val game = games[page]
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopStart) {
+            BladeGameCard(
+                game = game,
+                viewModel = viewModel,
+                onLaunch = { onLaunch(game) },
+                onDetails = { onDetails(game) },
+            )
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun GameCell(
+private fun BladeGameCard(
     game: Game,
     viewModel: GameLibraryViewModel,
-    onLaunch: (Game) -> Unit,
-    onLongPress: (Game) -> Unit,
+    onLaunch: () -> Unit,
+    onDetails: () -> Unit,
 ) {
     val context = LocalContext.current
-    // Once per cell: the File.exists() stat must not run on every recomposition while
-    // scrolling.
+    // Once per card: the File.exists() stat must not run on every recomposition.
     val iconModel = remember(game.stableId) { viewModel.iconFileOrFallback(game) }
 
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val glowAlpha by animateFloatAsState(
-        targetValue = if (pressed) 1f else 0.55f,
+        targetValue = if (pressed) 1f else 0.85f,
         animationSpec = tween(150),
-        label = "tileGlow",
+        label = "cardGlow",
     )
-    val borderWidth = if (pressed) BladeTile.TileBorderWidthFocused else BladeTile.TileBorderWidth
 
     Column(
         Modifier
-            .padding(8.dp)
+            .width(260.dp)
             .clip(RoundedCornerShape(BladeTile.TileCorner))
-            .background(
-                Brush.verticalGradient(
-                    listOf(BladeTile.SurfaceRaised, BladeTile.Surface)
-                )
-            )
+            .background(BladeTile.Surface)
             .border(
-                width = borderWidth,
+                width = 2.dp,
                 color = BladeTile.Glow.copy(alpha = glowAlpha),
                 shape = RoundedCornerShape(BladeTile.TileCorner),
             )
             .combinedClickable(
                 interactionSource = interactionSource,
                 indication = null,
-                onClick = { onLaunch(game) },
-                onLongClick = { onLongPress(game) },
-            )
-            .padding(10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+                onClick = onLaunch,
+                onLongClick = onDetails,
+            ),
     ) {
+        // Header banner: the XboxDroid wordmark on its diagonal green sweep, standing in
+        // for the "XBOX 360" title strip on the real dashboard's game tiles.
+        Image(
+            painter = painterResource(R.drawable.xboxdroid_wordmark),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(42.dp)
+                .clip(RoundedCornerShape(topStart = BladeTile.TileCorner, topEnd = BladeTile.TileCorner)),
+        )
         Box(
             Modifier
-                .clip(RoundedCornerShape(8.dp))
+                .fillMaxWidth()
+                .height(220.dp)
                 .background(BladeTile.Surface),
+            contentAlignment = Alignment.Center,
         ) {
             AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(iconModel)
-                    .build(),
+                model = ImageRequest.Builder(context).data(iconModel).build(),
                 contentDescription = game.name,
-                modifier = Modifier.size(BladeTile.IconSize),
+                modifier = Modifier.size(160.dp),
             )
         }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            game.name,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Medium,
-            color = BladeTile.TextPrimary,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        // A set shares one title, so the tiles would otherwise be identical.
-        if (game.isMultiDisc) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(BladeTile.SurfaceRaised)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+        ) {
             Text(
-                "Disc ${game.discNumber} of ${game.discCount}",
-                style = MaterialTheme.typography.labelSmall,
+                game.name,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = BladeTile.TextPrimary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                // A set shares one title, so the tiles would otherwise be identical.
+                if (game.isMultiDisc) "Disc ${game.discNumber} of ${game.discCount}"
+                else "XboxDroid Game",
+                style = MaterialTheme.typography.bodySmall,
                 color = BladeTile.TextSecondary,
                 maxLines = 1,
             )
         }
+    }
+}
+
+@Composable
+private fun BladeButtonLegend(
+    onLaunch: () -> Unit,
+    onDetails: () -> Unit,
+    onOptions: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LegendButton("A", Color(0xFF6FBE44), "Launch", onLaunch)
+        LegendButton("X", Color(0xFF2C7FC1), "Game Details", onDetails)
+        LegendButton("Y", Color(0xFFC79A1E), "Options", onOptions)
+    }
+}
+
+@Composable
+private fun LegendButton(letter: String, color: Color, label: String, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp, horizontal = 6.dp),
+    ) {
+        Box(
+            Modifier.size(28.dp).clip(CircleShape).background(color),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(letter, color = Color.White, fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelLarge)
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = BladeTile.TextPrimary, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
