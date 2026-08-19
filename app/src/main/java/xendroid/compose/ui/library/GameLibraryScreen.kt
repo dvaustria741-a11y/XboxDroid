@@ -137,18 +137,21 @@ fun GameLibraryScreen(
     // (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE) — the user brings them back manually,
     // the app never forces them to stay visible. Restored on leaving this screen so
     // other screens (dialogs, settings) aren't silently left in immersive mode too.
+    //
+    // No WindowCompat.setDecorFitsSystemWindow() call here: targetSdk 35 (Android 15)
+    // makes edge-to-edge the default for the whole app, so there's nothing left to
+    // "opt out" of — that method was removed from current androidx.core because of it.
+    // The insets controller alone is enough to hide/show the bars.
     val view = LocalView.current
     DisposableEffect(view) {
         val window = (context as? Activity)?.window
         if (window != null) {
             val controller = WindowCompat.getInsetsController(window, view)
-            WindowCompat.setDecorFitsSystemWindow(window, false)
             controller.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             controller.hide(WindowInsetsCompat.Type.systemBars())
             onDispose {
                 controller.show(WindowInsetsCompat.Type.systemBars())
-                WindowCompat.setDecorFitsSystemWindow(window, true)
             }
         } else {
             onDispose {}
