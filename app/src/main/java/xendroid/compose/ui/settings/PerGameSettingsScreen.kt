@@ -1,24 +1,29 @@
 package xendroid.compose.ui.settings
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import xendroid.compose.R
 import xendroid.compose.settings.GameSettingsViewModel
 import xendroid.compose.settings.SettingsCategory
+import xendroid.compose.ui.theme.BladeTile
 
 /**
  * The per-game override editor: the same two-level INDEX -> DETAIL shape as
@@ -71,7 +76,6 @@ fun PerGameSettingsScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PerGameIndex(
     gameName: String,
@@ -80,46 +84,59 @@ private fun PerGameIndex(
     onOpen: (SettingsCategory) -> Unit,
     onBack: () -> Unit,
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(if (gameName.isNotEmpty()) "$gameName settings" else "Per-game settings") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-            )
-        }
-    ) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-            // Header note: title id is keyed per game, so overrides apply to every copy.
-            item {
+    Box(Modifier.fillMaxSize()) {
+        Image(
+            painter = painterResource(R.drawable.library_bg),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Box(Modifier.fillMaxSize().background(BladeTile.ScreenTint.copy(alpha = 0.55f)))
+
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+        ) {
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
+                Text(
+                    if (gameName.isNotEmpty()) "$gameName settings" else "Per-game settings",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = BladeTile.TextPrimary,
+                )
+                Spacer(Modifier.height(4.dp))
+                // Title id is keyed per game (not per file), so this applies to every copy.
                 Text(
                     "Overrides apply to all copies of this game.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    color = BladeTile.TextSecondary,
                 )
-                HorizontalDivider()
             }
-            items(categories, key = { it.title }) { cat ->
-                val overridden = overriddenCountOf(cat)
-                ListItem(
-                    headlineContent = { Text(cat.title) },
-                    supportingContent = {
-                        Text(buildString {
+
+            LazyColumn(
+                Modifier.weight(1f).padding(start = 20.dp)
+                    .fillMaxWidth(BladeTile.ListWidthFraction)
+                    .widthIn(max = BladeTile.ListMaxWidth),
+                contentPadding = PaddingValues(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(categories, key = { it.title }) { cat ->
+                    val overridden = overriddenCountOf(cat)
+                    SettingsCategoryRow(
+                        title = cat.title,
+                        subtitle = buildString {
                             append("${cat.settings.size} settings")
                             if (overridden > 0) append("  ·  $overridden overridden")
-                        })
-                    },
-                    trailingContent = {
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Open")
-                    },
-                    modifier = Modifier.clickable { onOpen(cat) },
-                )
-                HorizontalDivider()
+                        },
+                        iconRes = categoryIcon(cat.title),
+                        onClick = { onOpen(cat) },
+                    )
+                }
             }
+
+            SettingsLegend(labelA = "Select", labelB = "Back", onB = onBack)
         }
     }
 }
@@ -132,27 +149,45 @@ private fun PerGameCategoryDetail(
     vm: GameSettingsViewModel,
     onBack: () -> Unit,
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(category.title) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to sections")
-                    }
-                },
-            )
-        }
-    ) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-            items(category.settings, key = { it.key }) { setting ->
-                OverrideRow(
-                    host = vm,
-                    s = setting,
-                    overrideValue = overrides[setting.key],
-                    onOverrideToggle = { vm.setOverride(setting, it) },
+    Box(Modifier.fillMaxSize()) {
+        Image(
+            painter = painterResource(R.drawable.library_bg),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Box(Modifier.fillMaxSize().background(BladeTile.ScreenTint.copy(alpha = 0.55f)))
+
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    title = { Text(category.title, color = BladeTile.TextPrimary,
+                        fontWeight = FontWeight.Bold) },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back to sections", tint = BladeTile.TextPrimary)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
                 )
-                HorizontalDivider()
+            }
+        ) { padding ->
+            LazyColumn(
+                Modifier.fillMaxSize().padding(padding).padding(start = 20.dp)
+                    .fillMaxWidth(BladeTile.ListWidthFraction)
+                    .widthIn(max = BladeTile.ListMaxWidth),
+            ) {
+                items(category.settings, key = { it.key }) { setting ->
+                    OverrideRow(
+                        host = vm,
+                        s = setting,
+                        overrideValue = overrides[setting.key],
+                        onOverrideToggle = { vm.setOverride(setting, it) },
+                    )
+                    HorizontalDivider(color = BladeTile.Border)
+                }
             }
         }
     }

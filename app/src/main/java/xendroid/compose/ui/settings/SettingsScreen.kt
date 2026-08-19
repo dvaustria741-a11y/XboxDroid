@@ -86,7 +86,7 @@ fun SettingsScreen(vm: SettingsViewModel, onBack: () -> Unit) {
  * video/monitor, UI/grid, storage/folder) — everything else falls back to the gear rather than
  * going iconless, until matching chip/gamepad/list glyphs are drawn for the rest.
  */
-private fun categoryIcon(title: String): Int = when (title) {
+internal fun categoryIcon(title: String): Int = when (title) {
     "Video", "Display" -> R.drawable.ic_cat_monitor
     "UI" -> R.drawable.ic_cat_grid
     "Storage", "Content" -> R.drawable.ic_cat_folder
@@ -124,8 +124,10 @@ private fun SettingsIndex(
             )
 
             LazyColumn(
-                Modifier.weight(1f).fillMaxWidth().widthIn(max = 620.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                Modifier.weight(1f).padding(start = 20.dp)
+                    .fillMaxWidth(BladeTile.ListWidthFraction)
+                    .widthIn(max = BladeTile.ListMaxWidth),
+                contentPadding = PaddingValues(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 items(categories, key = { it.title }) { cat ->
@@ -148,7 +150,7 @@ private fun SettingsIndex(
 }
 
 @Composable
-private fun SettingsCategoryRow(
+internal fun SettingsCategoryRow(
     title: String,
     subtitle: String,
     iconRes: Int,
@@ -212,7 +214,7 @@ private fun SettingsCategoryRow(
 }
 
 @Composable
-private fun SettingsLegend(labelA: String, labelB: String, onB: () -> Unit) {
+internal fun SettingsLegend(labelA: String, labelB: String, onB: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -279,7 +281,11 @@ private fun SettingsCategoryDetail(
                 )
             }
         ) { padding ->
-            LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+            LazyColumn(
+                Modifier.fillMaxSize().padding(padding).padding(start = 20.dp)
+                    .fillMaxWidth(BladeTile.ListWidthFraction)
+                    .widthIn(max = BladeTile.ListMaxWidth),
+            ) {
                 items(category.settings, key = { it.key }) { setting ->
                     val sv = values[setting.key]
                     SettingRow(vm, setting, modified = sv?.modified == true, raw = sv?.raw)

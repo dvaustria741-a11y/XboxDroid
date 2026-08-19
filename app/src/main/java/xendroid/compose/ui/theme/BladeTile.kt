@@ -27,4 +27,12 @@ object BladeTile {
     val TileBorderWidth = 1.dp
     val TileBorderWidthFocused = 2.dp
     val IconSize = 96.dp
+
+    // Settings-style lists (category index, detail rows) read as full-bleed bars if they
+    // stretch to the screen edge — a Blades list is a column of pills with the atmospheric
+    // background still visible alongside it, not a wall-to-wall sheet. Fraction handles
+    // narrow phones (falls back to most of the width); the dp cap stops it from getting
+    // silly-wide on tablets/landscape.
+    val ListWidthFraction = 0.62f
+    val ListMaxWidth = 520.dp
 }
