@@ -27,12 +27,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import xendroid.compose.R
 import xendroid.compose.ui.theme.BladeTile
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -125,6 +129,27 @@ fun GameLibraryScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Immersive by default: status/nav bars stay hidden so the dashboard reads edge to
+    // edge like the real console UI, and a swipe from either edge reveals them
+    // temporarily (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE) rather than the app forcing
+    // them to stay visible. Restored on leaving this screen so other screens aren't
+    // silently left in immersive mode too.
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val activity = context as? Activity
+        if (activity != null) {
+            val window = activity.window
+            WindowCompat.setDecorFitsSystemWindow(window, false)
+            val controller = WindowCompat.getInsetsController(window, view)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            onDispose { controller.show(WindowInsetsCompat.Type.systemBars()) }
+        } else {
+            onDispose { }
+        }
     }
 
     if (showBrowser) {
@@ -251,24 +276,26 @@ fun GameLibraryScreen(
             // below, echoing the tile borders instead of a flat Material app bar shadow.
             HorizontalDivider(thickness = 2.dp, color = BladeTile.Glow.copy(alpha = 0.6f))
 
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                PullToRefreshBox(
-                    isRefreshing = isRefreshing,
-                    onRefresh = { viewModel.refresh() },
-                    modifier = Modifier.fillMaxSize(),
-                ) {
+            PullToRefreshBox(
+                isRefreshing = isRefreshing,
+                onRefresh = { viewModel.refresh() },
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            ) {
+                Column(Modifier.fillMaxSize()) {
                     val setFolderLabel =
                         if (allFilesGranted) "Set game folder" else "Grant All Files Access"
                     when (val s = state) {
                         LibraryUiState.NoVulkan ->
-                            NoVulkanDialog(onQuit = { (context as? Activity)?.finish() })
+                            Box(Modifier.weight(1f).fillMaxSize(), contentAlignment = Alignment.Center) {
+                                NoVulkanDialog(onQuit = { (context as? Activity)?.finish() })
+                            }
                         LibraryUiState.Loading ->
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Box(Modifier.weight(1f).fillMaxSize(), contentAlignment = Alignment.Center) {
                                 CircularProgressIndicator()
                             }
                         // All Files Access is API 30+; on API 29 there is no games path at all.
                         LibraryUiState.NoFolder ->
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Box(Modifier.weight(1f).fillMaxSize(), contentAlignment = Alignment.Center) {
                                 if (AllFilesAccess.isSupported)
                                     EmptyMessage("No game folder set", setFolderLabel,
                                         onAction = startRealPathMode)
@@ -278,40 +305,47 @@ fun GameLibraryScreen(
                                         "OK", onAction = {})
                             }
                         LibraryUiState.PermissionLost ->
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Box(Modifier.weight(1f).fillMaxSize(), contentAlignment = Alignment.Center) {
                                 EmptyMessage("Folder access lost", setFolderLabel,
                                     onAction = startRealPathMode)
                             }
                         is LibraryUiState.Error ->
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Box(Modifier.weight(1f).fillMaxSize(), contentAlignment = Alignment.Center) {
                                 EmptyMessage(s.message, "Retry", onAction = { viewModel.refresh() })
                             }
                         is LibraryUiState.Loaded ->
                             if (s.games.isEmpty())
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Box(Modifier.weight(1f).fillMaxSize(), contentAlignment = Alignment.Center) {
                                     EmptyMessage("No games in this folder", "Choose another",
                                         onAction = startRealPathMode)
                                 }
-                            else BladeLibraryPager(
-                                games = s.games,
-                                viewModel = viewModel,
-                                onPageChanged = { currentPage = it },
-                                onLaunch = launchWithDiscCheck,
-                                onDetails = { pendingGame = it },
-                            )
+                            else {
+                                // Fixed to the card's own height rather than weight(1f) —
+                                // the pager should hug the card like the real dashboard's
+                                // tile does, not stretch to fill the screen and shove the
+                                // A/X/Y legend down to the very bottom.
+                                BladeLibraryPager(
+                                    games = s.games,
+                                    viewModel = viewModel,
+                                    onPageChanged = { currentPage = it },
+                                    onLaunch = launchWithDiscCheck,
+                                    onDetails = { pendingGame = it },
+                                    modifier = Modifier.height(330.dp),
+                                )
+                                val currentGame = s.games.getOrNull(currentPage)
+                                if (currentGame != null) {
+                                    // Bottom action legend, mirroring the Xbox 360 A/X/Y
+                                    // control hints — tappable here since touch has no
+                                    // physical controller to read them off of.
+                                    BladeButtonLegend(
+                                        onLaunch = { launchWithDiscCheck(currentGame) },
+                                        onDetails = { pendingGame = currentGame },
+                                        onOptions = { menuOpen = true },
+                                    )
+                                }
+                            }
                     }
                 }
-            }
-
-            // Bottom action legend, mirroring the Xbox 360 A/X/Y control hints — tappable
-            // here since touch has no physical controller to read them off of.
-            val currentGame = loaded?.games?.getOrNull(currentPage)
-            if (currentGame != null) {
-                BladeButtonLegend(
-                    onLaunch = { launchWithDiscCheck(currentGame) },
-                    onDetails = { pendingGame = currentGame },
-                    onOptions = { menuOpen = true },
-                )
             }
         }
     }
@@ -575,6 +609,7 @@ private fun BladeLibraryPager(
     onPageChanged: (Int) -> Unit,
     onLaunch: (Game) -> Unit,
     onDetails: (Game) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val pagerState = rememberPagerState(pageCount = { games.size })
     LaunchedEffect(pagerState.currentPage) { onPageChanged(pagerState.currentPage) }
@@ -583,7 +618,7 @@ private fun BladeLibraryPager(
         state = pagerState,
         pageSpacing = 16.dp,
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp),
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier.fillMaxWidth(),
     ) { page ->
         val game = games[page]
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopStart) {
