@@ -19,6 +19,9 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -176,7 +179,16 @@ fun GameLibraryScreen(
     // balloons to ~40%+ of the width on a narrower one. Fraction-based sizing looks
     // right regardless of the device or which way it's rotated.
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val cardWidth = (maxWidth * 0.24f).coerceIn(200.dp, 300.dp)
+        // Width alone isn't enough: a landscape screen is wide but short, so a
+        // width-only card could be taller than the screen has room for once the
+        // header and BladeBottomBar are accounted for — which was exactly why the
+        // A/X/Y legend was going off the bottom edge in landscape. Reserve that
+        // fixed chrome first, then size the card against whichever dimension is
+        // tighter.
+        val reservedChromeHeight = 160.dp
+        val cardWidthByWidth = maxWidth * 0.24f
+        val cardWidthByHeight = (maxHeight - reservedChromeHeight).coerceAtLeast(0.dp) / BladeCardAspect
+        val cardWidth = minOf(cardWidthByWidth, cardWidthByHeight).coerceIn(150.dp, 300.dp)
 
         // Ambient blade backdrop, full bleed behind the status bar too, matching the
         // Xbox 360 dashboard's edge-to-edge glow instead of sitting under a flat app bar.
@@ -196,99 +208,30 @@ fun GameLibraryScreen(
         ) {
             val loaded = state as? LibraryUiState.Loaded
             val pageCount = loaded?.games?.size ?: 0
+            val currentGame = loaded?.games?.getOrNull(currentPage)
 
-            Row(
+            Column(
                 Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp, vertical = 16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top,
             ) {
-                Column {
+                Text(
+                    "Library",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = BladeTile.TextPrimary,
+                )
+                if (pageCount > 0) {
                     Text(
-                        "Library",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = BladeTile.TextPrimary,
+                        "${currentPage + 1} of $pageCount",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = BladeTile.TextSecondary,
                     )
-                    if (pageCount > 0) {
-                        Text(
-                            "${currentPage + 1} of $pageCount",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = BladeTile.TextSecondary,
-                        )
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onOpenSettings) {
-                        Image(
-                            painter = painterResource(R.drawable.ic_gear_blade),
-                            contentDescription = "Settings",
-                            modifier = Modifier.size(28.dp),
-                        )
-                    }
-                    Box {
-                        IconButton(onClick = { menuOpen = true }) {
-                            Image(
-                                painter = painterResource(R.drawable.ic_menu_blade),
-                                contentDescription = "More",
-                                modifier = Modifier.size(28.dp),
-                            )
-                        }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            // Only offered where All Files Access exists (API 30+); on API 29 the
-                            // empty state explains why.
-                            if (AllFilesAccess.isSupported) {
-                                DropdownMenuItem(
-                                    text = { Text("Set game folder") },
-                                    onClick = { menuOpen = false; startRealPathMode() },
-                                )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Install content") },
-                                onClick = { menuOpen = false; onOpenInstallContent() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Profiles") },
-                                onClick = { menuOpen = false; onOpenProfiles() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Key mapping") },
-                                onClick = { menuOpen = false; onOpenKeymap() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Touch controls") },
-                                onClick = { menuOpen = false; onOpenTouchControls() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Open user data") },
-                                onClick = {
-                                    menuOpen = false
-                                    openUserData(context)
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("About") },
-                                onClick = { menuOpen = false; onOpenAbout() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Check for Updates") },
-                                onClick = {
-                                    menuOpen = false
-                                    checkForUpdatesClicked(
-                                        context = context,
-                                        scope = scope,
-                                        onResult = { updateResult = it }
-                                    )
-                                }
-                            )
-                        }
-                    }
                 }
             }
-            // Blade-edge seam: a thin glowing line separating the header from the pager
-            // below, echoing the tile borders instead of a flat Material app bar shadow.
-            HorizontalDivider(thickness = 2.dp, color = BladeTile.Glow.copy(alpha = 0.6f))
+            // No header divider and no top-right gear/menu icons here: the reference
+            // Xbox 360 dashboard has neither. Settings/More live in the bottom-right
+            // pill instead (BladeBottomBar, below).
 
             PullToRefreshBox(
                 isRefreshing = isRefreshing,
@@ -348,21 +291,39 @@ fun GameLibraryScreen(
                                     onDetails = { pendingGame = it },
                                     modifier = Modifier.height(cardWidth * BladeCardAspect + 16.dp),
                                 )
-                                val currentGame = s.games.getOrNull(currentPage)
-                                if (currentGame != null) {
-                                    // Bottom action legend, mirroring the Xbox 360 A/X/Y
-                                    // control hints — tappable here since touch has no
-                                    // physical controller to read them off of.
-                                    BladeButtonLegend(
-                                        onLaunch = { launchWithDiscCheck(currentGame) },
-                                        onDetails = { pendingGame = currentGame },
-                                        onOptions = { menuOpen = true },
-                                    )
-                                }
                             }
                     }
                 }
             }
+
+            // Fixed bottom chrome, sibling to the weight(1f) pager area above rather than
+            // flowing inside it — this is what actually guarantees it stays on-screen in
+            // landscape instead of being pushed past the bottom edge once the pager grew
+            // taller than available height. Mirrors the reference dashboard: A/X/Y legend
+            // bottom-left, Settings/More Options pill bottom-right.
+            BladeBottomBar(
+                currentGame = currentGame,
+                menuOpen = menuOpen,
+                onMenuOpenChange = { menuOpen = it },
+                onLaunch = { g -> launchWithDiscCheck(g) },
+                onDetails = { g -> pendingGame = g },
+                onOpenSettings = onOpenSettings,
+                onSetGameFolder = { menuOpen = false; startRealPathMode() },
+                onInstallContent = { menuOpen = false; onOpenInstallContent() },
+                onProfiles = { menuOpen = false; onOpenProfiles() },
+                onKeymap = { menuOpen = false; onOpenKeymap() },
+                onTouchControls = { menuOpen = false; onOpenTouchControls() },
+                onOpenUserData = { menuOpen = false; openUserData(context) },
+                onAbout = { menuOpen = false; onOpenAbout() },
+                onCheckForUpdates = {
+                    menuOpen = false
+                    checkForUpdatesClicked(
+                        context = context,
+                        scope = scope,
+                        onResult = { updateResult = it },
+                    )
+                },
+            )
         }
     }
 
@@ -745,6 +706,106 @@ private fun BladeGameCard(
                 maxLines = 1,
             )
         }
+    }
+}
+
+@Composable
+private fun BladeBottomBar(
+    currentGame: Game?,
+    menuOpen: Boolean,
+    onMenuOpenChange: (Boolean) -> Unit,
+    onLaunch: (Game) -> Unit,
+    onDetails: (Game) -> Unit,
+    onOpenSettings: () -> Unit,
+    onSetGameFolder: () -> Unit,
+    onInstallContent: () -> Unit,
+    onProfiles: () -> Unit,
+    onKeymap: () -> Unit,
+    onTouchControls: () -> Unit,
+    onOpenUserData: () -> Unit,
+    onAbout: () -> Unit,
+    onCheckForUpdates: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (currentGame != null) {
+            BladeButtonLegend(
+                onLaunch = { onLaunch(currentGame) },
+                onDetails = { onDetails(currentGame) },
+                onOptions = { onMenuOpenChange(true) },
+            )
+        } else {
+            Spacer(Modifier)
+        }
+
+        Box(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
+            SettingsMorePill(
+                onSettings = onOpenSettings,
+                onMore = { onMenuOpenChange(true) },
+            )
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { onMenuOpenChange(false) }) {
+                // Only offered where All Files Access exists (API 30+); on API 29 the
+                // empty state explains why.
+                if (AllFilesAccess.isSupported) {
+                    DropdownMenuItem(text = { Text("Set game folder") }, onClick = onSetGameFolder)
+                }
+                DropdownMenuItem(text = { Text("Install content") }, onClick = onInstallContent)
+                DropdownMenuItem(text = { Text("Profiles") }, onClick = onProfiles)
+                DropdownMenuItem(text = { Text("Key mapping") }, onClick = onKeymap)
+                DropdownMenuItem(text = { Text("Touch controls") }, onClick = onTouchControls)
+                DropdownMenuItem(text = { Text("Open user data") }, onClick = onOpenUserData)
+                DropdownMenuItem(text = { Text("About") }, onClick = onAbout)
+                DropdownMenuItem(text = { Text("Check for Updates") }, onClick = onCheckForUpdates)
+            }
+        }
+    }
+}
+
+/**
+ * Bottom-right "Settings | More Options" pill, matching the reference dashboard's mouse/
+ * touch shortcut bar (as distinct from the controller-style A/X/Y legend on the left).
+ * Built from stock Material icons rather than the old ic_gear_blade/ic_menu_blade drawables
+ * — those were a flat black gear and a malformed half-rendered hamburger glyph, neither of
+ * which matched the sprite sheet's clean glowing-outline style this reaches for instead.
+ */
+@Composable
+private fun SettingsMorePill(
+    onSettings: () -> Unit,
+    onMore: () -> Unit,
+) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(BladeTile.Surface.copy(alpha = 0.75f))
+            .border(1.dp, BladeTile.Glow.copy(alpha = 0.5f), RoundedCornerShape(50)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PillItem(Icons.Filled.Settings, "Settings", onSettings)
+        Box(
+            Modifier
+                .height(20.dp)
+                .width(1.dp)
+                .background(BladeTile.Border),
+        )
+        PillItem(Icons.Filled.Menu, "More Options", onMore)
+    }
+}
+
+@Composable
+private fun PillItem(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = BladeTile.Glow, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = BladeTile.TextPrimary, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
