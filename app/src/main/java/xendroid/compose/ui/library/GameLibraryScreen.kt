@@ -38,7 +38,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import xendroid.compose.R
-import xendroid.compose.ui.ImmersiveSystemBars
 import xendroid.compose.ui.theme.BladeTile
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -133,8 +132,6 @@ fun GameLibraryScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-
-    ImmersiveSystemBars()
 
     if (showBrowser) {
         FolderBrowserScreen(

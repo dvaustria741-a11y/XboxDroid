@@ -18,6 +18,7 @@ import xendroid.compose.ui.library.ACTION_LAUNCH_GAME
 import xendroid.compose.ui.library.EXTRA_GAME_URI
 import xendroid.compose.core.SessionLogs
 import xendroid.compose.ui.AppNavHost
+import xendroid.compose.ui.ImmersiveSystemBars
 import xendroid.compose.ui.theme.xendroidTheme
 import xendroid.compose.settings.ConfigStore
 import xendroid.compose.settings.seedTouchOverlayDefault
@@ -75,6 +76,11 @@ class MainActivity : ComponentActivity() {
 
        setContent {
             xendroidTheme {
+
+                // Hoisted to the app root so every screen goes edge-to-edge, not just the
+                // ones that opted in individually — per-screen calls left every other
+                // destination showing the bars after a "restore on leave" from Library/Settings.
+                ImmersiveSystemBars()
 
                 AppNavHost(container)
 
