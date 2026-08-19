@@ -7,6 +7,7 @@ navigationCompose = "2.8.4"
 lifecycleViewmodelCompose = "2.8.7"
 junit = "4.13.2"
 appcompat = "1.6.1"
+coreKtx = "1.13.1"
 documentfile = "1.0.1"
 coil = "2.7.0"
 kotlinxSerializationJson = "1.7.3"
@@ -16,6 +17,7 @@ coroutinesTest = "1.8.1"
 [libraries]
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 documentfile = { group = "androidx.documentfile", name = "documentfile", version.ref = "documentfile" }
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }

@@ -27,12 +27,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import xendroid.compose.R
 import xendroid.compose.ui.theme.BladeTile
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -127,6 +132,29 @@ fun GameLibraryScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // Immersive by default: status/nav bars stay hidden so the dashboard reads edge to
+    // edge like the real console UI. A swipe from either edge reveals them temporarily
+    // (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE) — the user brings them back manually,
+    // the app never forces them to stay visible. Restored on leaving this screen so
+    // other screens (dialogs, settings) aren't silently left in immersive mode too.
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val window = (context as? Activity)?.window
+        if (window != null) {
+            val controller = WindowCompat.getInsetsController(window, view)
+            WindowCompat.setDecorFitsSystemWindow(window, false)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            onDispose {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+                WindowCompat.setDecorFitsSystemWindow(window, true)
+            }
+        } else {
+            onDispose {}
+        }
+    }
+
     if (showBrowser) {
         FolderBrowserScreen(
             onFolderChosen = { path ->
@@ -138,7 +166,15 @@ fun GameLibraryScreen(
         return
     }
 
-    Box(Modifier.fillMaxSize()) {
+    // BoxWithConstraints instead of Box: the card is sized as a FRACTION of the real
+    // screen (matched against the Xbox 360 dashboard reference image, where the tile
+    // is ~23% of screen width) rather than a fixed dp, which was the actual bug behind
+    // "too big" — a fixed 260.dp card is a small sliver on a wide landscape screen but
+    // balloons to ~40%+ of the width on a narrower one. Fraction-based sizing looks
+    // right regardless of the device or which way it's rotated.
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val cardWidth = (maxWidth * 0.24f).coerceIn(200.dp, 300.dp)
+
         // Ambient blade backdrop, full bleed behind the status bar too, matching the
         // Xbox 360 dashboard's edge-to-edge glow instead of sitting under a flat app bar.
         Image(
@@ -295,17 +331,19 @@ fun GameLibraryScreen(
                                         onAction = startRealPathMode)
                                 }
                             else {
-                                // Fixed to the card's own height rather than weight(1f) —
-                                // the pager should hug the card like the real dashboard's
-                                // tile does, not stretch to fill the screen and shove the
-                                // A/X/Y legend down to the very bottom.
+                                // Sized off cardWidth (a screen fraction, see above) and the
+                                // card's own aspect ratio, rather than a fixed height or
+                                // weight(1f) — the pager should hug the card like the real
+                                // dashboard's tile does, not stretch to fill the screen and
+                                // shove the A/X/Y legend down to the very bottom.
                                 BladeLibraryPager(
                                     games = s.games,
                                     viewModel = viewModel,
+                                    cardWidth = cardWidth,
                                     onPageChanged = { currentPage = it },
                                     onLaunch = launchWithDiscCheck,
                                     onDetails = { pendingGame = it },
-                                    modifier = Modifier.height(330.dp),
+                                    modifier = Modifier.height(cardWidth * BladeCardAspect + 16.dp),
                                 )
                                 val currentGame = s.games.getOrNull(currentPage)
                                 if (currentGame != null) {
@@ -576,11 +614,21 @@ fun GameLibraryScreen(
     }
 }
 
+// Card proportions taken from the Xbox 360 dashboard reference: header strip, icon
+// panel, and text footer all scale together off cardWidth so the tile keeps the same
+// silhouette at any size instead of a fixed-height header/icon fighting a resized card.
+private const val BladeHeaderFrac = 42f / 260f
+private const val BladeIconBoxFrac = 220f / 260f
+private const val BladeIconSizeFrac = 160f / 260f
+private val BladeTextFooterHeight = 76.dp // title (up to 2 lines) + subtitle; not scaled — type size doesn't shrink with the card
+val BladeCardAspect = BladeIconBoxFrac + BladeHeaderFrac + (BladeTextFooterHeight / 260.dp)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BladeLibraryPager(
     games: List<Game>,
     viewModel: GameLibraryViewModel,
+    cardWidth: Dp,
     onPageChanged: (Int) -> Unit,
     onLaunch: (Game) -> Unit,
     onDetails: (Game) -> Unit,
@@ -600,6 +648,7 @@ private fun BladeLibraryPager(
             BladeGameCard(
                 game = game,
                 viewModel = viewModel,
+                cardWidth = cardWidth,
                 onLaunch = { onLaunch(game) },
                 onDetails = { onDetails(game) },
             )
@@ -612,6 +661,7 @@ private fun BladeLibraryPager(
 private fun BladeGameCard(
     game: Game,
     viewModel: GameLibraryViewModel,
+    cardWidth: Dp,
     onLaunch: () -> Unit,
     onDetails: () -> Unit,
 ) {
@@ -629,7 +679,7 @@ private fun BladeGameCard(
 
     Column(
         Modifier
-            .width(260.dp)
+            .width(cardWidth)
             .clip(RoundedCornerShape(BladeTile.TileCorner))
             .background(BladeTile.Surface)
             .border(
@@ -652,26 +702,27 @@ private fun BladeGameCard(
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(42.dp)
+                .height(cardWidth * BladeHeaderFrac)
                 .clip(RoundedCornerShape(topStart = BladeTile.TileCorner, topEnd = BladeTile.TileCorner)),
         )
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(220.dp)
+                .height(cardWidth * BladeIconBoxFrac)
                 .background(BladeTile.Surface),
             contentAlignment = Alignment.Center,
         ) {
             AsyncImage(
                 model = ImageRequest.Builder(context).data(iconModel).build(),
                 contentDescription = game.name,
-                modifier = Modifier.size(160.dp),
+                modifier = Modifier.size(cardWidth * BladeIconSizeFrac),
             )
         }
         Column(
             Modifier
                 .fillMaxWidth()
                 .background(BladeTile.SurfaceRaised)
+                .heightIn(min = BladeTextFooterHeight)
                 .padding(horizontal = 14.dp, vertical = 12.dp),
         ) {
             Text(
@@ -700,9 +751,11 @@ private fun BladeButtonLegend(
     onDetails: () -> Unit,
     onOptions: () -> Unit,
 ) {
+    // Wrap-content, not fillMaxWidth: the reference dashboard's A/X/Y legend sits left-
+    // aligned under the tile at its natural width. Stretching it edge-to-edge on a
+    // narrow screen was what forced "Options" to wrap onto two lines.
     Row(
         Modifier
-            .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.spacedBy(20.dp),
         verticalAlignment = Alignment.CenterVertically,

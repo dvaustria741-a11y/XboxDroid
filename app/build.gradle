@@ -104,6 +104,11 @@ androidComponents {
 dependencies {
     implementation project(':emulator-core')
 
+    // Explicit (not left to transitive resolution) so WindowCompat's newer
+    // insets-controller APIs (used for immersive system bars) are reliably on
+    // this module's own compile classpath.
+    implementation libs.androidx.core.ktx
+
     implementation platform(libs.compose.bom)
     implementation libs.compose.ui
     implementation libs.compose.ui.graphics
