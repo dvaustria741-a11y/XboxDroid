@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -115,8 +116,11 @@ private fun PerGameIndex(
                 )
             }
 
+            var highlighted by remember { mutableStateOf<SettingsCategory?>(null) }
+
             LazyColumn(
-                Modifier.weight(1f).padding(start = 20.dp)
+                Modifier.weight(1f)
+                    .align(Alignment.CenterHorizontally)
                     .fillMaxWidth(BladeTile.ListWidthFraction)
                     .widthIn(max = BladeTile.ListMaxWidth),
                 contentPadding = PaddingValues(vertical = 4.dp),
@@ -131,12 +135,20 @@ private fun PerGameIndex(
                             if (overridden > 0) append("  ·  $overridden overridden")
                         },
                         iconRes = categoryIcon(cat.title),
-                        onClick = { onOpen(cat) },
+                        selected = highlighted?.title == cat.title,
+                        onClick = {
+                            if (highlighted?.title == cat.title) onOpen(cat) else highlighted = cat
+                        },
                     )
                 }
             }
 
-            SettingsLegend(labelA = "Select", labelB = "Back", onB = onBack)
+            SettingsLegend(
+                labelA = "Select",
+                labelB = "Back",
+                onA = highlighted?.let { cat -> { onOpen(cat) } },
+                onB = onBack,
+            )
         }
     }
 }
@@ -174,19 +186,20 @@ private fun PerGameCategoryDetail(
                 )
             }
         ) { padding ->
-            LazyColumn(
-                Modifier.fillMaxSize().padding(padding).padding(start = 20.dp)
-                    .fillMaxWidth(BladeTile.ListWidthFraction)
-                    .widthIn(max = BladeTile.ListMaxWidth),
-            ) {
-                items(category.settings, key = { it.key }) { setting ->
-                    OverrideRow(
-                        host = vm,
-                        s = setting,
-                        overrideValue = overrides[setting.key],
-                        onOverrideToggle = { vm.setOverride(setting, it) },
-                    )
-                    HorizontalDivider(color = BladeTile.Border)
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
+                LazyColumn(
+                    Modifier.fillMaxHeight().fillMaxWidth(BladeTile.ListWidthFraction)
+                        .widthIn(max = BladeTile.ListMaxWidth),
+                ) {
+                    items(category.settings, key = { it.key }) { setting ->
+                        OverrideRow(
+                            host = vm,
+                            s = setting,
+                            overrideValue = overrides[setting.key],
+                            onOverrideToggle = { vm.setOverride(setting, it) },
+                        )
+                        HorizontalDivider(color = BladeTile.Border)
+                    }
                 }
             }
         }

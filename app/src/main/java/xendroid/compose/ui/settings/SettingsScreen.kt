@@ -100,6 +100,11 @@ private fun SettingsIndex(
     onOpen: (SettingsCategory) -> Unit,
     onBack: () -> Unit,
 ) {
+    // Tapping a row only highlights it; opening it is a separate, explicit step (tapping the
+    // already-highlighted row again, or pressing the A badge) so the on-screen "A Select"
+    // legend actually does something instead of being a dead label next to an instant-open row.
+    var highlighted by remember { mutableStateOf<SettingsCategory?>(null) }
+
     Box(Modifier.fillMaxSize()) {
         Image(
             painter = painterResource(R.drawable.library_bg),
@@ -124,7 +129,8 @@ private fun SettingsIndex(
             )
 
             LazyColumn(
-                Modifier.weight(1f).padding(start = 20.dp)
+                Modifier.weight(1f)
+                    .align(Alignment.CenterHorizontally)
                     .fillMaxWidth(BladeTile.ListWidthFraction)
                     .widthIn(max = BladeTile.ListMaxWidth),
                 contentPadding = PaddingValues(vertical = 4.dp),
@@ -139,12 +145,20 @@ private fun SettingsIndex(
                             if (modified > 0) append("  ·  $modified changed")
                         },
                         iconRes = categoryIcon(cat.title),
-                        onClick = { onOpen(cat) },
+                        selected = highlighted?.title == cat.title,
+                        onClick = {
+                            if (highlighted?.title == cat.title) onOpen(cat) else highlighted = cat
+                        },
                     )
                 }
             }
 
-            SettingsLegend(labelA = "Select", labelB = "Back", onB = onBack)
+            SettingsLegend(
+                labelA = "Select",
+                labelB = "Back",
+                onA = highlighted?.let { cat -> { onOpen(cat) } },
+                onB = onBack,
+            )
         }
     }
 }
@@ -154,12 +168,13 @@ internal fun SettingsCategoryRow(
     title: String,
     subtitle: String,
     iconRes: Int,
+    selected: Boolean = false,
     onClick: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val glowAlpha by animateFloatAsState(
-        targetValue = if (pressed) 1f else 0f,
+        targetValue = if (pressed || selected) 1f else 0f,
         animationSpec = tween(150),
         label = "rowGlow",
     )
@@ -168,7 +183,7 @@ internal fun SettingsCategoryRow(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(BladeTile.TileCorner))
-            .background(BladeTile.Surface)
+            .background(if (selected) BladeTile.SurfaceRaised else BladeTile.Surface)
             .border(
                 width = 2.dp,
                 color = BladeTile.Glow.copy(alpha = glowAlpha),
@@ -214,7 +229,12 @@ internal fun SettingsCategoryRow(
 }
 
 @Composable
-internal fun SettingsLegend(labelA: String, labelB: String, onB: () -> Unit) {
+internal fun SettingsLegend(
+    labelA: String,
+    labelB: String,
+    onB: () -> Unit,
+    onA: (() -> Unit)? = null,
+) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -222,32 +242,40 @@ internal fun SettingsLegend(labelA: String, labelB: String, onB: () -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // "A" is informational only — tapping a row already opens it directly, there's no
-        // separate focus-then-confirm step for this list, so the badge has nothing to do.
-        // Making it non-clickable stops it from looking like a dead button.
-        LegendBadge("A", Color(0xFF6FBE44), labelA, onClick = null)
+        // Dims (and stops responding to taps) until something is actually highlighted to
+        // select — otherwise it invites a tap that has nothing to confirm.
+        LegendBadge("A", Color(0xFF6FBE44), labelA, onClick = onA, enabled = onA != null)
         LegendBadge("B", Color(0xFFC0392B), labelB, onClick = onB)
     }
 }
 
 @Composable
-private fun LegendBadge(letter: String, color: Color, label: String, onClick: (() -> Unit)?) {
+private fun LegendBadge(
+    letter: String,
+    color: Color,
+    label: String,
+    onClick: (() -> Unit)?,
+    enabled: Boolean = true,
+) {
+    val dim = !enabled
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(50))
-            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+            .let { if (onClick != null && enabled) it.clickable(onClick = onClick) else it }
             .padding(vertical = 4.dp, horizontal = 6.dp),
     ) {
         Box(
-            Modifier.size(26.dp).clip(CircleShape).background(color),
+            Modifier.size(26.dp).clip(CircleShape)
+                .background(if (dim) color.copy(alpha = 0.35f) else color),
             contentAlignment = Alignment.Center,
         ) {
-            Text(letter, color = Color.White, fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.labelMedium)
+            Text(letter, color = Color.White.copy(alpha = if (dim) 0.6f else 1f),
+                fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
         }
         Spacer(Modifier.width(6.dp))
-        Text(label, color = BladeTile.TextPrimary, style = MaterialTheme.typography.bodyMedium)
+        Text(label, color = if (dim) BladeTile.TextSecondary else BladeTile.TextPrimary,
+            style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -284,15 +312,16 @@ private fun SettingsCategoryDetail(
                 )
             }
         ) { padding ->
-            LazyColumn(
-                Modifier.fillMaxSize().padding(padding).padding(start = 20.dp)
-                    .fillMaxWidth(BladeTile.ListWidthFraction)
-                    .widthIn(max = BladeTile.ListMaxWidth),
-            ) {
-                items(category.settings, key = { it.key }) { setting ->
-                    val sv = values[setting.key]
-                    SettingRow(vm, setting, modified = sv?.modified == true, raw = sv?.raw)
-                    HorizontalDivider(color = BladeTile.Border)
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
+                LazyColumn(
+                    Modifier.fillMaxHeight().fillMaxWidth(BladeTile.ListWidthFraction)
+                        .widthIn(max = BladeTile.ListMaxWidth),
+                ) {
+                    items(category.settings, key = { it.key }) { setting ->
+                        val sv = values[setting.key]
+                        SettingRow(vm, setting, modified = sv?.modified == true, raw = sv?.raw)
+                        HorizontalDivider(color = BladeTile.Border)
+                    }
                 }
             }
         }
